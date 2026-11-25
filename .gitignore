@@ -1,0 +1,7 @@
+﻿node_modules/
+dist/
+indx/
+indx-1/
+.env
+.env.production
+.env.production.bak

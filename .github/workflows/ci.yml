@@ -1,0 +1,36 @@
+# Runs on every push / pull request: everything `npm run verify` does, plus artifacts.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck (app)
+        run: npm run typecheck
+      - name: Typecheck (Edge Functions)
+        run: npm run typecheck:functions
+      - name: Tests (unit + database + end-to-end rehearsal)
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Preflight (development target, no secrets in bundle, headers)
+        run: npm run preflight -- --json > preflight.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight
+          path: preflight.json
