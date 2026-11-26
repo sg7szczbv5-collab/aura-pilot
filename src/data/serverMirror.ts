@@ -44,6 +44,24 @@ async function riderCode(trip: Trip): Promise<string> {
   return data
 }
 
+/** In-trip chat (public.ride_messages, migration 018) → the app's ChatMessage list. */
+async function rideChat(rideId: string): Promise<NonNullable<Trip['chat']>> {
+  const { data } = await getSupabase().from('ride_messages').select('sender_kind, body, created_at').eq('ride_id', rideId).order('created_at').limit(200)
+  return (data ?? [])
+    .filter((m) => m.sender_kind === 'rider' || m.sender_kind === 'driver')
+    .map((m) => ({ from: m.sender_kind === 'rider' ? ('passenger' as const) : ('driver' as const), text: m.body as string, at: Date.parse(m.created_at as string) }))
+}
+
+/** Send a chat message on an active ride (the database sets the sender). */
+export async function sendRideMessage(rideId: string, text: string): Promise<boolean> {
+  const body = text.trim().slice(0, 500)
+  if (!body) return false
+  const { error } = await getSupabase().from('ride_messages').insert({ ride_id: rideId, body })
+  if (error) return false
+  await refreshRide(rideId)
+  return true
+}
+
 /** Re-read one ride from the server and merge it into the store. */
 export async function refreshRide(rideId: string): Promise<Trip | null> {
   const { data, error } = await getSupabase().rpc('ride_view', { p_ride_id: rideId })
@@ -53,6 +71,8 @@ export async function refreshRide(rideId: string): Promise<Trip | null> {
   if (state.app === 'rider' && view.viewer === 'rider') trip.otp = await riderCode(trip)
   const local = store.state.trips.find((t) => t.id === trip.id)
   if (local?.live && trip.live && local.live.at > trip.live.at) trip.live = local.live // keep the fresher Realtime fix
+  if (isActive(trip.status)) trip.chat = await rideChat(rideId)
+  else if (local?.chat) trip.chat = local.chat
   const extra = rideViewCounterparts(view)
   store.mergeServer({ trips: [trip], ...extra })
   if (state.app === 'rider') trackDriver(isActive(trip.status) && trip.driverId ? trip.driverId : undefined, trip.id)
@@ -210,6 +230,8 @@ export function startRideSync(app: App, uid: string): () => void {
     .then(({ data }) => data?.forEach((r) => refresh(r.id as string)))
 
   let ch = sb.channel(`aura-rides-${app}-${uid}`)
+  // New chat messages on my rides (RLS limits Realtime to the two parties).
+  ch = ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ride_messages' }, (p: { new: Record<string, unknown> }) => refresh(p.new.ride_id as string))
   if (app === 'rider') {
     ch = ch.on('postgres_changes', { event: '*', schema: 'public', table: 'rides', filter: `rider_id=eq.${uid}` }, onChange)
   } else {

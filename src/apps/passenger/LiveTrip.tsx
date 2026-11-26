@@ -17,6 +17,8 @@ import { clock, sar } from '../../core/format'
 import { pathKm, remainingRoute } from '../../core/geo'
 import type { Trip } from '../../core/types'
 import { PAYMENT_LABEL } from './Booking'
+import { AUTH_MODE } from '../../auth/config'
+import { sendRideMessage } from '../../data/serverMirror'
 
 /* ============================== SEARCHING ============================== */
 
@@ -247,8 +249,13 @@ export function ChatSheet({ trip, open, onClose, me }: { trip: Trip; open: boole
     me === 'passenger'
       ? [t('أنا في الطريق للنقطة', "I'm heading to the pickup"), t('أنتظرك عند المدخل', "I'm waiting at the entrance"), t('هل يمكنك الانتظار دقيقة؟', 'Can you wait a minute?')]
       : [t('وصلت، أنا بانتظارك', "I've arrived, waiting for you"), t('أنا في الطريق', "I'm on my way"), t('الزحام شديد، سأتأخر قليلاً', 'Heavy traffic, slight delay')]
-  const send = (s: string) => {
-    actions.sendChat(trip.id, me, s)
+  const toast = useToast()
+  const send = async (s: string) => {
+    if (!s.trim()) return
+    if (AUTH_MODE === 'supabase') {
+      // Live: public.ride_messages — delivered to the other party through Realtime.
+      if (!(await sendRideMessage(trip.id, s))) return toast(t('تعذّر إرسال الرسالة', 'Could not send the message'), 'error')
+    } else actions.sendChat(trip.id, me, s)
     setText('')
   }
   return (

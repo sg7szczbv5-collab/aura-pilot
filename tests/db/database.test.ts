@@ -23,7 +23,7 @@ const MIGRATIONS = join(ROOT, 'supabase', 'migrations')
 
 const EXPECTED_TABLES = [
   'audit_log', 'cities', 'driver_documents', 'driver_locations', 'drivers', 'payment_methods',
-  'payments', 'payouts', 'privacy_requests', 'profiles', 'promos', 'ride_events', 'ride_offers', 'ride_route_points', 'riders', 'rides', 'tariffs',
+  'payments', 'payouts', 'privacy_requests', 'profiles', 'promos', 'ride_events', 'ride_messages', 'ride_offers', 'ride_route_points', 'riders', 'rides', 'tariffs',
   'ticket_messages', 'tickets', 'trip_shares', 'user_consents', 'vehicles', 'wallet_accounts', 'wallet_ledger', 'wasl_sync_log', 'zones',
 ]
 
@@ -113,7 +113,7 @@ beforeAll(async () => {
 
 // ────────────────────────────────────────────────────────────────────────────
 describe('schema', () => {
-  it('creates exactly the 26 AURA tables (21 core + 2 privacy + 2 trip tracking + trip shares), all with RLS enabled', async () => {
+  it('creates exactly the 27 AURA tables (21 core + 2 privacy + 2 trip tracking + trip shares + ride chat), all with RLS enabled', async () => {
     const r = await db.query<{ tablename: string; rowsecurity: boolean }>(
       `select tablename, rowsecurity from pg_tables where schemaname = 'public' order by tablename`)
     expect(r.rows.map((x) => x.tablename)).toEqual(EXPECTED_TABLES)
@@ -338,6 +338,23 @@ describe('ride lifecycle (state machine, dispatch, PIN, settlement)', () => {
     expect(await rows(riderB, `select driver_id from driver_locations`)).toEqual([])
   })
 
+  it('in-trip chat (migration 018): only the two parties, sender set by the database', async () => {
+    await as(riderA, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, '  أنا عند البوابة  ')`, [rideId]))
+    await as(driver, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'وصلت')`, [rideId]))
+    // A client cannot choose the sender (column not granted) …
+    await expect(as(riderA, (tx) => tx.query(`insert into ride_messages (ride_id, body, sender_id) values ($1, 'x', $2)`, [rideId, driver]))).rejects.toThrow(/permission denied/)
+    const m = await rows<{ sender_kind: string; sender_id: string; body: string }>(driver, `select sender_kind, sender_id, body from ride_messages where ride_id = $1 order by created_at, sender_kind desc`, [rideId])
+    expect(m).toEqual([
+      { sender_kind: 'rider', sender_id: riderA, body: 'أنا عند البوابة' },
+      { sender_kind: 'driver', sender_id: driver, body: 'وصلت' },
+    ])
+    // … another rider can neither read nor write, and nobody can edit or delete.
+    expect(await rows(riderB, `select id from ride_messages`)).toEqual([])
+    await expect(as(riderB, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'hi')`, [rideId]))).rejects.toThrow(/row-level security/)
+    await expect(as(riderA, (tx) => tx.query(`update ride_messages set body = 'edited' where ride_id = $1`, [rideId]))).rejects.toThrow(/permission denied/)
+    await expect(as(riderA, (tx) => tx.query(`delete from ride_messages where ride_id = $1`, [rideId]))).rejects.toThrow(/permission denied/)
+  })
+
   it('trip starts only with the rider PIN', async () => {
     const code = (await one<{ code: string }>(riderA, `select issue_ride_verification_code($1) as code`, [rideId])).code
     expect(code).toMatch(/^\d{4}$/)
@@ -355,6 +372,13 @@ describe('ride lifecycle (state machine, dispatch, PIN, settlement)', () => {
     expect(e.map((x) => x.to_status)).toEqual(
       ['searching', 'driver_assigned', 'driver_arriving', 'driver_arrived', 'in_progress', 'completed'])
     await expect(as('service', (tx) => tx.query(`delete from ride_events where ride_id = $1`, [rideId]))).rejects.toThrow(/append-only/)
+  })
+
+  it('in-trip chat is closed once the trip has ended; retention purges it later', async () => {
+    await expect(as(riderA, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'late')`, [rideId]))).rejects.toThrow(/row-level security/)
+    expect((await rows(riderA, `select id from ride_messages where ride_id = $1`, [rideId])).length).toBe(2) // still readable
+    await expect(rows(riderA, `select private.purge_ride_messages(0)`)).rejects.toThrow(/permission denied/)
+    expect((await one<{ n: number }>('service', `select private.purge_ride_messages(30) as n`)).n).toBe(0) // too recent
   })
 
   it('settles a cash ride with a balanced double entry, once (automatically on completion since Stage 5)', async () => {

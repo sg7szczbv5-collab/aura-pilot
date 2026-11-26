@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
 import { Bell, Car, ChevronLeft, ChevronRight, FileText, Globe, HelpCircle, LogOut, TrendingUp, User, Gift, Banknote, History, FileUp, Lock } from 'lucide-react'
@@ -14,6 +14,8 @@ import { STATUS_LABEL } from '../../core/trip'
 import type { Driver, Trip } from '../../core/types'
 import { Panel, TopBar } from '../shared/mobile'
 import { HelpPanel } from '../passenger/Tabs'
+import { AUTH_MODE } from '../../auth/config'
+import { getSupabase } from '../../auth/supabaseClient'
 
 const TAG_LABEL: Record<string, { ar: string; en: string }> = {
   safe_driving: { ar: 'قيادة آمنة', en: 'Safe driving' },
@@ -114,6 +116,81 @@ function DriverTripDetail({ trip }: { trip: Trip }) {
 /* ============================== EARNINGS ============================== */
 
 export function EarningsTab({ driver }: { driver: Driver }) {
+  // Live: everything from the server (statement, payouts, completed trips) — no demo
+  // incentives or generated "paid" weeks (docs/beta/BETA_READINESS.md).
+  if (AUTH_MODE === 'supabase') return <LiveEarnings driverId={driver.id} />
+  return <DemoEarnings driver={driver} />
+}
+
+type ServerPayout = { id: string; amount_halalas: number; status: string; requested_at: string; paid_at: string | null }
+type ServerRide = { id: string; ride_number: number; dropoff_address: string; completed_at: string; driver_net_halalas: number; tip_halalas: number; payment_method: string }
+
+function LiveEarnings({ driverId }: { driverId: string }) {
+  const { t, lang } = useI18n()
+  const [range, setRange] = useState<'day' | 'week' | 'month' | 'all'>('week')
+  const from = { day: startOfDay(), week: startOfDay() - 6 * DAY, month: startOfDay() - 29 * DAY, all: 0 }[range]
+  const statementFrom = useMemo(() => new Date(from), [from])
+  const [payouts, setPayouts] = useState<ServerPayout[]>([])
+  const [rides, setRides] = useState<ServerRide[]>([])
+  useEffect(() => {
+    let alive = true
+    const sb = getSupabase()
+    void Promise.all([
+      sb.from('payouts').select('id, amount_halalas, status, requested_at, paid_at').eq('driver_id', driverId).order('requested_at', { ascending: false }).limit(20),
+      sb.from('rides').select('id, ride_number, dropoff_address, completed_at, driver_net_halalas, tip_halalas, payment_method').eq('driver_id', driverId).eq('status', 'completed').gte('completed_at', new Date(from).toISOString()).order('completed_at', { ascending: false }).limit(100),
+    ]).then(([p, r]) => {
+      if (!alive) return
+      setPayouts((p.data ?? []) as ServerPayout[])
+      setRides((r.data ?? []) as ServerRide[])
+    })
+    return () => {
+      alive = false
+    }
+  }, [driverId, from])
+  const PAYOUT: Record<string, [string, 'live' | 'pending' | 'danger']> = {
+    paid: [t('محوّل', 'Paid'), 'live'],
+    pending: [t('بانتظار الاعتماد', 'Awaiting approval'), 'pending'],
+    approved: [t('معتمد', 'Approved'), 'pending'],
+    processing: [t('قيد التحويل', 'Processing'), 'pending'],
+    failed: [t('فشل', 'Failed'), 'danger'],
+    cancelled: [t('ملغى', 'Cancelled'), 'danger'],
+  }
+  return (
+    <div className="absolute inset-0 flex flex-col">
+      <TopBar title={t('الأرباح', 'Earnings')} />
+      <div className="thin-scroll-dark flex-1 overflow-y-auto px-4 pb-6">
+        <Segmented
+          className="w-full"
+          value={range}
+          onChange={setRange}
+          options={[
+            { value: 'day', label: t('اليوم', 'Today') },
+            { value: 'week', label: t('الأسبوع', 'Week') },
+            { value: 'month', label: t('الشهر', 'Month') },
+            { value: 'all', label: t('الإجمالي', 'Total') },
+          ]}
+        />
+        <DriverStatementCard from={statementFrom} />
+        <h3 className="mt-5 mb-1 text-[13px] font-semibold text-white/55">{t('سجل التحويلات', 'Transfers')}</h3>
+        <div className="divide-y divide-white/8">
+          {payouts.map((p) => (
+            <Row key={p.id} icon={<Banknote size={18} {...ICON} />} title={<Money h={p.amount_halalas} size="sm" />} sub={dateTime(Date.parse(p.paid_at ?? p.requested_at), lang)} end={<Badge tone={PAYOUT[p.status]?.[1] ?? 'pending'}>{PAYOUT[p.status]?.[0] ?? p.status}</Badge>} />
+          ))}
+          {payouts.length === 0 && <p className="py-3 text-xs text-white/45">{t('لا توجد تحويلات بعد', 'No transfers yet')}</p>}
+        </div>
+        <h3 className="mt-5 mb-1 text-[13px] font-semibold text-white/55">
+          {t('رحلات مكتملة', 'Completed trips')} <span className="num">({rides.length})</span>
+        </h3>
+        {rides.map((x) => (
+          <Row key={x.id} title={x.dropoff_address} sub={`${dateTime(Date.parse(x.completed_at), lang)} · #${x.ride_number} · ${x.payment_method}`} end={<Money h={x.driver_net_halalas + (x.tip_halalas ?? 0)} size="sm" className="text-go" />} />
+        ))}
+        {rides.length === 0 && <EmptyState title={t('لا توجد رحلات في هذه الفترة', 'No trips in this period')} />}
+      </div>
+    </div>
+  )
+}
+
+function DemoEarnings({ driver }: { driver: Driver }) {
   const { t, L, lang } = useI18n()
   const rev = useEco((s) => s.rev)
   const payouts = useEco((s) => s.payouts.filter((p) => p.driverId === driver.id))
