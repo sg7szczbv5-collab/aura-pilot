@@ -54,7 +54,18 @@ function markerElement(m: MapMarker, dark: boolean): HTMLElement {
   return el
 }
 
-export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
+function toPaddingTuple(padding: CityMapProps['padding']): [number, number, number, number] {
+  if (typeof padding === 'number') return [padding, padding, padding, padding]
+  if (Array.isArray(padding)) {
+    return [padding[0] ?? 80, padding[1] ?? 40, padding[2] ?? 120, padding[3] ?? 40]
+  }
+  if (padding && typeof padding === 'object') {
+    return [padding.top ?? 80, padding.right ?? 40, padding.bottom ?? 120, padding.left ?? 40]
+  }
+  return [80, 40, 120, 40]
+}
+
+export function GoogleCityMap(props: CityMapProps & { fallback?: ReactNode }) {
   const {
     theme = 'light',
     markers = [],
@@ -84,6 +95,7 @@ export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
   const dark = theme === 'dark'
+  const fitPoints = Array.isArray(fit) ? fit : []
 
   // Create the map once.
   useEffect(() => {
@@ -92,7 +104,7 @@ export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
       .then((g) => {
         if (dead || !host.current) return
         gRef.current = g
-        const c = center ?? fit?.[0] ?? RIYADH
+        const c = center ?? fitPoints[0] ?? RIYADH
         const map = new g.maps.Map(host.current, {
           center: c,
           zoom: pxPerKmToGoogleZoom(zoom, c.lat),
@@ -138,14 +150,15 @@ export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
   useEffect(() => {
     const map = mapRef.current
     const g = gRef.current
-    if (!ready || !map || !g || !fit?.length) return
-    if (fit.length === 1) {
-      map.panTo(fit[0])
+    if (!ready || !map || !g || !fitPoints.length) return
+    if (fitPoints.length === 1) {
+      map.panTo(fitPoints[0])
       return
     }
+    const [top, right, bottom, left] = toPaddingTuple(padding)
     const b = new g.maps.LatLngBounds()
-    fit.forEach((p) => b.extend(p))
-    map.fitBounds(b, { top: padding[0], right: padding[1], bottom: padding[2], left: padding[3] })
+    fitPoints.forEach((p) => b.extend(p))
+    map.fitBounds(b, { top, right, bottom, left })
   }, [ready, fitKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Markers (reconciled by id).
@@ -186,21 +199,24 @@ export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
     const g = gRef.current
     if (!ready || !map || !g) return
     const live = new Set<string>()
-    for (const r of routes as MapRoute[]) {
-      live.add(r.id)
-      const color = r.tone === 'go' ? GO : r.tone === 'mute' ? MUTE : dark ? '#ffffff' : INK
+    routes.forEach((item, idx) => {
+      const r: MapRoute = Array.isArray(item) ? { id: `route-${idx}`, pts: item } : item
+      const routeId = r.id ?? `route-${idx}`
+      const routePath = r.pts ?? r.path ?? []
+      live.add(routeId)
+      const color = r.color ?? (r.tone === 'go' ? GO : r.tone === 'mute' ? MUTE : dark ? '#ffffff' : INK)
       const opts: google.maps.PolylineOptions = {
         map,
-        path: r.pts,
+        path: routePath,
         strokeColor: color,
         strokeOpacity: r.dashed ? 0 : 0.95,
         strokeWeight: r.width ?? 5,
         icons: r.dashed ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, strokeColor: color, scale: 3 }, offset: '0', repeat: '14px' }] : undefined,
       }
-      const obj = lineObjs.current.get(r.id)
+      const obj = lineObjs.current.get(routeId)
       if (obj) obj.setOptions(opts)
-      else lineObjs.current.set(r.id, new g.maps.Polyline(opts))
-    }
+      else lineObjs.current.set(routeId, new g.maps.Polyline(opts))
+    })
     for (const [id, obj] of lineObjs.current) {
       if (!live.has(id)) {
         obj.setMap(null)
@@ -215,8 +231,9 @@ export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
     const g = gRef.current
     if (!ready || !map || !g) return
     const live = new Set<string>()
-    for (const z of zones as MapZone[]) {
-      live.add(z.id)
+    zones.forEach((z: MapZone, idx) => {
+      const zoneId = z.id ?? `zone-${idx}`
+      live.add(zoneId)
       const color = z.kind === 'restricted' ? '#d64545' : z.kind === 'high_demand' ? GO : z.kind === 'airport' ? '#3f6fd6' : MUTE
       const opts: google.maps.CircleOptions = {
         map,
@@ -228,15 +245,15 @@ export function GoogleCityMap(props: CityMapProps & { fallback: ReactNode }) {
         fillOpacity: z.active === false ? 0.04 : 0.12,
         clickable: !!z.onClick,
       }
-      let obj = zoneObjs.current.get(z.id)
+      let obj = zoneObjs.current.get(zoneId)
       if (obj) obj.setOptions(opts)
       else {
         obj = new g.maps.Circle(opts)
-        zoneObjs.current.set(z.id, obj)
+        zoneObjs.current.set(zoneId, obj)
       }
       g.maps.event.clearListeners(obj, 'click')
       if (z.onClick) obj.addListener('click', z.onClick)
-    }
+    })
     for (const [id, obj] of zoneObjs.current) {
       if (!live.has(id)) {
         obj.setMap(null)
