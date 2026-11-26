@@ -37,12 +37,13 @@ export interface MapRoute {
   path?: LatLng[];
   width?: number;
   color?: string;
+  dashed?: boolean;
 }
 
 export interface MapZone {
   id?: string;
   center: LatLng;
-  radiusKm?: number;
+  radiusKm: number;
   kind?: string;
   label?: string;
   active?: boolean;
@@ -81,8 +82,9 @@ const DEFAULT_CENTER: LatLng = {
 
 function getMapboxToken(): string {
   const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-  const globalProcess = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } })
-    .process;
+  const globalProcess = (
+    globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }
+  ).process;
 
   return (
     viteEnv?.VITE_MAPBOX_ACCESS_TOKEN ||
@@ -166,9 +168,7 @@ function createMarkerElement(marker: MapMarker, showLabels: boolean): HTMLDivEle
   return wrapper;
 }
 
-function normalizePadding(
-  padding: CityMapProps['padding']
-): number | mapboxgl.PaddingOptions {
+function normalizePadding(padding: CityMapProps['padding']): number | mapboxgl.PaddingOptions {
   if (typeof padding === 'number') return padding;
   if (Array.isArray(padding) && padding.length > 0) {
     const [top = 48, right = 48, bottom = 48, left = 48] = padding;
