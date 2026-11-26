@@ -49,12 +49,42 @@ export function UploadTile({ label, file, onFile, icon }: { label: string; file?
   )
 }
 
+const DOC_NAMES: Record<string, [string, string]> = {
+  national_id: ['الهوية', 'ID'],
+  driving_license: ['رخصة القيادة', 'driving licence'],
+  profile_photo: ['الصورة الشخصية', 'profile photo'],
+  vehicle_registration: ['استمارة المركبة', 'vehicle registration'],
+  vehicle_insurance: ['التأمين', 'insurance'],
+}
+const docList = (e: string, lang: 0 | 1) =>
+  (e.split(':').pop() ?? '').split(',').map((x) => DOC_NAMES[x.trim()]?.[lang] ?? x.trim()).filter(Boolean).join(lang ? ', ' : '، ')
+
+/** Server / storage error from the captain application or resubmission → a message the captain can act on. */
 export function onboardingErrorText(e: string, t: (ar: string, en: string) => string): string {
-  if (e.includes('national ID')) return t('رقم الهوية غير صحيح', 'The ID number is not valid')
-  if (e.includes('IBAN')) return t('الآيبان غير صحيح', 'The IBAN is not valid')
-  if (e.includes('older than')) return t('المركبة أقدم من المسموح', 'The vehicle is older than allowed')
-  if (e.includes('expiry')) return t('تحقق من تواريخ انتهاء الوثائق', 'Check the document expiry dates')
-  if (e.includes('duplicate') || e.includes('unique')) return t('اللوحة أو الرقم التسلسلي أو رقم الهوية مسجّل مسبقاً', 'The plate, sequence number or ID is already registered')
+  const s = e.toLowerCase()
+  if (e === 'server_outdated' || s.includes('could not find the function'))
+    return t('تصحيح بيانات نفس المركبة غير متاح حالياً. اختر «مركبة أخرى» أو تواصل مع الدعم.', 'Correcting the same vehicle is not available yet. Choose “Another vehicle” or contact support.')
+  if (s.includes('missing or past expiry')) return t(`تاريخ الانتهاء ناقص أو منتهٍ: ${docList(e, 0)}`, `Missing or past expiry date: ${docList(e, 1)}`)
+  if (s.includes('missing documents')) return t(`مستندات ناقصة: ${docList(e, 0)}`, `Missing documents: ${docList(e, 1)}`)
+  if (s.includes('accept the captain terms')) return t('يجب الموافقة على اتفاقية الكابتن وسياسة الخصوصية أولاً. سجّل الخروج ثم الدخول ووافق عليها.', 'Accept the captain agreement and privacy notices first (sign out and in again).')
+  if (s.includes('add a vehicle')) return t('أضف مركبة أولاً', 'Add a vehicle first')
+  if (s.includes('national id') && s.includes('not valid')) return t('رقم الهوية غير صحيح', 'The ID number is not valid')
+  if (s.includes('iban')) return t('الآيبان غير صحيح', 'The IBAN is not valid')
+  if (s.includes('at least 18')) return t('يجب أن يكون عمر الكابتن ١٨ سنة على الأقل', 'Captains must be at least 18')
+  if (s.includes('older than')) return t('المركبة أقدم من المسموح', 'The vehicle is older than allowed')
+  if (s.includes('expiry')) return t('تحقق من تواريخ انتهاء الوثائق', 'Check the document expiry dates')
+  if (s.includes('already registered') || s.includes('duplicate') || s.includes('unique'))
+    return t('اللوحة أو الرقم التسلسلي مسجّل لمركبة أخرى. تحقق من البيانات أو تواصل مع الدعم.', 'The plate or sequence number is registered to another vehicle.')
+  if (s.includes('vehicles_plate') || s.includes('plate_letters') || s.includes('plate_number')) return t('تحقق من أرقام وحروف اللوحة', 'Check the plate digits and letters')
+  if (s.includes('sequence_number')) return t('الرقم التسلسلي يجب أن يكون ٦–١٢ رقماً', 'The sequence number must be 6–12 digits')
+  if (s.includes('xl_seats')) return t('فئة XL تتطلب مركبة ٧ مقاعد', 'Aura XL needs a 7-seat vehicle')
+  if (s.includes('can no longer be edited') || s.includes('approved captains'))
+    return t('لا يمكن تعديل هذه المركبة الآن. تواصل مع الدعم.', 'This vehicle can no longer be edited. Contact support.')
+  if (s.includes('payload too large') || s.includes('exceeded the maximum') || s.includes('entity too large')) return t('حجم الملف كبير، الحد ١٠ م.ب', 'The file is too large (max 10 MB)')
+  if (s.includes('mime') || s.includes('content type')) return t('نوع الملف غير مدعوم، استخدم JPG أو PNG أو PDF', 'Unsupported file type; use JPG, PNG or PDF')
+  if (s.includes('row-level security') || s.includes('permission denied') || s.includes('jwt') || s.includes('not authenticated'))
+    return t('انتهت الجلسة أو لا توجد صلاحية. سجّل الخروج ثم الدخول وحاول مرة أخرى.', 'Session expired or not allowed. Sign out and in, then try again.')
+  if (s.includes('failed to fetch') || s === 'network' || s.includes('network')) return t('تعذّر الاتصال بالخادم، تحقق من الإنترنت وحاول مرة أخرى', 'Could not reach the server; check your connection')
   if (e.startsWith('invalid:')) return t('بعض البيانات ناقصة أو غير صحيحة', 'Some details are missing or invalid')
   return t('تعذّر إرسال الطلب، حاول مرة أخرى', 'Could not submit the application, please try again')
 }

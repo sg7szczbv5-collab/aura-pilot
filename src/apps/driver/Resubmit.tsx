@@ -35,6 +35,8 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
   const [expiry, setExpiry] = useState<Partial<Record<DocKey, string>>>({})
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  /** Technical detail (step · server message) under the error, for support. */
+  const [errDetail, setErrDetail] = useState('')
   const today = new Date().toISOString().slice(0, 10)
 
   // The current vehicle, to prefill "correct the vehicle details".
@@ -85,6 +87,7 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
 
   const submit = async () => {
     setErr('')
+    setErrDetail('')
     const input = {
       driverStatus: d.status,
       mode,
@@ -100,7 +103,9 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
       const r = await resubmitServer({ ...input, uid: driverId })
       if (!r.ok) {
         setBusy(false)
-        return setErr(r.error.includes('already registered') ? t('اللوحة أو الرقم التسلسلي مسجّل مسبقاً', 'The plate or sequence number is already registered') : onboardingErrorText(r.error, t))
+        console.error('resubmit failed', r)
+        setErrDetail(r.error.startsWith('invalid:') ? '' : `${r.step ?? ''} · ${r.error}`)
+        return setErr(onboardingErrorText(r.error, t))
       }
       await syncDriverSelf(driverId)
     } else {
@@ -197,9 +202,14 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
           )}
         </section>
         {err && (
-          <p role="alert" className="rounded-xl bg-danger/15 px-3 py-2 text-sm text-danger">
-            {err}
-          </p>
+          <div role="alert" className="rounded-xl bg-danger/15 px-3 py-2 text-sm text-danger">
+            <p>{err}</p>
+            {errDetail && (
+              <p className="num mt-1 break-all text-[10.5px] text-danger/70" dir="ltr">
+                {errDetail}
+              </p>
+            )}
+          </div>
         )}
       </div>
       <div className="px-5 pt-3" style={{ paddingBottom: 'calc(var(--safe-bottom) + 10px)' }}>
