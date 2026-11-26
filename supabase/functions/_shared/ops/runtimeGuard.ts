@@ -65,7 +65,8 @@ export function liveRequests(env: Env): string[] {
   if (provider !== 'mock') out.push(`PAYMENT_PROVIDER=${provider}`)
   if ((env('WASL_MODE') ?? 'mock') !== 'mock') out.push(`WASL_MODE=${env('WASL_MODE')}`)
   if ((env('PAYOUT_PROVIDER') ?? 'mock') !== 'mock') out.push(`PAYOUT_PROVIDER=${env('PAYOUT_PROVIDER')}`)
-  if (/^sk_live_/.test(env('MOYASAR_SECRET_KEY') ?? '')) out.push('MOYASAR_SECRET_KEY is a live key')
+  // BETA is mock-only: any Moyasar secret (test or live) counts as a request for a live integration.
+  if ((env('MOYASAR_SECRET_KEY') ?? '') !== '') out.push(`MOYASAR_SECRET_KEY is set (${/^sk_live_/.test(env('MOYASAR_SECRET_KEY') ?? '') ? 'live' : 'non-live'})`)
   if ((env('WASL_APP_KEY') ?? '') !== '') out.push('WASL_APP_KEY is set')
   return out
 }

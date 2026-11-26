@@ -17,6 +17,7 @@ import { getWaslProvider } from '../supabase/functions/_shared/wasl/worker'
 import { healthResponse, type Readiness } from '../supabase/functions/_shared/ops/health'
 import { checkConfig, checkGuard, type Env, type GuardConfig } from '../src/ops/configChecks'
 import { PROD_PROJECT_REF as APP_PROD_REF, projectRefFromUrl as appRefFromUrl } from '../src/ops/prodBinding'
+import { parseEnvFile } from '../src/ops/envFile'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8')
@@ -70,7 +71,8 @@ describe('A7 · D3: workers refuse before any external call when the environment
       expect(d.ok, JSON.stringify(vars)).toBe(false)
       expect(d.reasons.join()).toMatch(/live_not_allowed/)
     }
-    expect(liveRequests(env({ MOYASAR_SECRET_KEY: 'sk_test_x' }))).toEqual([])
+    expect(liveRequests(env({ MOYASAR_SECRET_KEY: 'sk_test_x' }))).toEqual(['MOYASAR_SECRET_KEY is set (non-live)'])
+    expect(liveRequests(env({}))).toEqual([])
   })
   it('the refusal body hides the reasons (they go to the logs)', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -200,7 +202,8 @@ describe('A12 · preflight and Deploy fail closed', () => {
     expect(blockers({ ...BASE, MOYASAR_SECRET_KEY: 'sk_live_abc' })).toContain('beta_no_live_keys')
     expect(blockers({ ...BASE, VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_live_abc' })).toContain('beta_no_live_keys')
     expect(blockers({ ...BASE, SOME_OTHER_NAME: 'sk_live_hidden' })).toContain('beta_no_live_keys')
-    expect(blockers({ ...BASE, PAYMENT_PROVIDER: 'moyasar', MOYASAR_SECRET_KEY: 'sk_test_a', VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_test_a', MOYASAR_WEBHOOK_SECRET: 'whsec_0123456789abcdef' })).toEqual(['beta_payments_mock'])
+    expect(blockers({ ...BASE, PAYMENT_PROVIDER: 'moyasar', MOYASAR_SECRET_KEY: 'sk_test_a', VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_test_a', MOYASAR_WEBHOOK_SECRET: 'whsec_0123456789abcdef' })).toEqual(['beta_payments_mock', 'beta_no_provider_credentials'])
+    expect(blockers({ ...BASE, MOYASAR_SECRET_KEY: 'sk_test_a' })).toEqual(['beta_no_provider_credentials']) // F3: test keys too
     expect(blockers({ ...BASE, VITE_PAYMENT_PROVIDER: 'moyasar' })).toContain('beta_payments_mock')
     expect(blockers({ ...BASE, WASL_MODE: 'live', WASL_API_BASE_URL: 'https://wasl.elm.sa', WASL_APP_ID: 'a', WASL_APP_KEY: 'k' })).toContain('beta_wasl_mock')
     expect(blockers({ ...BASE, WASL_APP_KEY: 'k' })).toContain('beta_wasl_mock')
@@ -274,5 +277,54 @@ describe('no demo data on live (Supabase-mode) screens', () => {
     expect(tabs).toMatch(/AUTH_MODE === 'supabase' \? \[\] : s\.inbox/)
     expect(read('src/apps/passenger/PassengerApp.tsx')).toMatch(/AUTH_MODE === 'supabase' \? 0 : s\.inbox/)
     expect(read('src/data/supportGateway.ts')).toMatch(/const LIVE = AUTH_MODE === 'supabase'/)
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('F3 · BETA is mock-only everywhere: config template, docs and checks agree', () => {
+  const example = parseEnvFile(read('.env.beta.example'))
+
+  it('.env.beta.example: every provider is mock and no Moyasar / Elm credential key is present', () => {
+    expect({ p: example.PAYMENT_PROVIDER, vp: example.VITE_PAYMENT_PROVIDER, po: example.PAYOUT_PROVIDER, w: example.WASL_MODE })
+      .toEqual({ p: 'mock', vp: 'mock', po: 'mock', w: 'mock' })
+    expect(Object.keys(example).filter((k) => /MOYASAR|WASL_APP|WASL_API/.test(k))).toEqual([])
+  })
+
+  it('the template, once filled with placeholder-free values, passes every BETA blocker', () => {
+    const filled = { ...example, VITE_SUPABASE_URL: url(BETA), SUPABASE_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon-key-value',
+      PAYMENTS_CRON_SECRET: 'a'.repeat(40), WASL_CRON_SECRET: 'b'.repeat(40), PRIVACY_CRON_SECRET: 'c'.repeat(40), HEALTH_SECRET: 'd'.repeat(40) }
+    expect(checkConfig(filled, 'staging', PROD).filter((c) => !c.ok && c.severity === 'blocker').map((c) => c.id)).toEqual([])
+  })
+
+  it('no BETA document or template allows Moyasar test keys, sandbox payments or non-mock providers', () => {
+    const forbidden = [/pk_test|sk_test/i, /moyasar\s+\**test\**\s+keys?/i, /test[- ]mode payments/i, /or Moyasar test/i, /TEST MODE ONLY/, /PAYMENT_PROVIDER=moyasar/]
+    for (const f of ['docs/beta/BETA_READINESS.md', 'docs/beta/BETA_SECURITY.md', '.env.beta.example']) {
+      const text = read(f)
+      for (const re of forbidden) expect(re.test(text), `${f} matches ${re}`).toBe(false)
+    }
+  })
+
+  it('runtime refuses any Moyasar secret in BETA, test or live', () => {
+    const d = decideRuntime({ supabaseUrl: url(BETA), env: env({ MOYASAR_SECRET_KEY: 'sk_test_dummy' }), config: betaCfg(), now: NOW, prodRef: null })
+    expect(d.ok).toBe(false)
+  })
+})
+
+describe('F6 · stale or failed integrity: fail closed, then automatic recovery (runtime)', () => {
+  it('the guard is evaluated on every request: refused while stale, served again as soon as the check is fresh', async () => {
+    let checkedAt = new Date(NOW.getTime() - 10 * 60_000).toISOString() // scheduler stopped for 10 minutes
+    const admin = { rpc: async () => ({ data: betaCfg({ integrity_checked_at: checkedAt }), error: null }) }
+    const vars = env({ SUPABASE_URL: url(BETA) })
+    expect((await runtimeGuard(admin, vars, NOW)).reasons).toEqual(['integrity_stale'])
+    checkedAt = new Date(NOW.getTime() - 30_000).toISOString() // the scheduled check ran again
+    expect(await runtimeGuard(admin, vars, NOW)).toMatchObject({ ok: true, reasons: [] })
+  })
+  it('failed → fixed → green: no restart, no manual reset of the functions', async () => {
+    let ok: boolean | null = false
+    const admin = { rpc: async () => ({ data: betaCfg({ integrity_ok: ok }), error: null }) }
+    const vars = env({ SUPABASE_URL: url(BETA) })
+    expect((await runtimeGuard(admin, vars, NOW)).ok).toBe(false)
+    ok = true
+    expect((await runtimeGuard(admin, vars, NOW)).ok).toBe(true)
   })
 })

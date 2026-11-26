@@ -21,8 +21,8 @@ deployment configuration. Evidence comes from:
 - **End-to-end UI test** (`npm run e2e:ui`): a full trip driven in the browser.
 - **Security headers / bundle scan** (`npm run preflight`), CSP checked in a real browser.
 
-Not testable here (no credentials / network): the production Supabase project, Moyasar
-sandbox, Elm Wasl, the SMS provider, Vercel. These are listed as open items, not as passed.
+Not testable here (no credentials / network): the production Supabase project, Moyasar,
+Elm Wasl, the SMS provider, Vercel. These are listed as open items, not as passed.
 
 ## 2. Findings
 
@@ -149,7 +149,7 @@ permissions are proven by DB tests. Not run against a live project (no credentia
 
 | Integration | State | Evidence |
 |---|---|---|
-| Moyasar | Implemented (cards, mada, Apple Pay tokens, 3-D Secure callback, capture / void / refund worker, webhook) | Mock-provider tests incl. replay and tampering. **Sandbox not exercised** — no test keys available here |
+| Moyasar | Implemented (cards, mada, Apple Pay tokens, 3-D Secure callback, capture / void / refund worker, webhook) | Mock-provider tests incl. replay and tampering. **Not exercised against Moyasar** (BETA is mock-only by policy) |
 | HyperPay | Interface only (not implemented) | — |
 | Captain payouts | Ledger + batch + status flow; provider `mock` | DB tests |
 | Wasl (Elm) | Mock rules + configurable HTTP adapter; endpoint paths and field mapping await the Elm specification | DB tests on the queue / retry / eligibility gate. **Live API not testable** |
@@ -164,8 +164,9 @@ permissions are proven by DB tests. Not run against a live project (no credentia
 2. **Auth**: phone provider + OTP length 6; admin TOTP MFA enabled; SMS rate limits.
 3. **Secrets** on the BETA project and Vercel environment (`.env.beta.example`): Supabase
    URL / anon key, four worker secrets (≥ 32 chars, all different), maps keys (optional).
-4. **Payments**: `mock`, or Moyasar **test** keys only, with the webhook secret set on both
-   sides. No live keys in BETA.
+4. **Payments, payouts and Wasl: `mock` only** (`PAYMENT_PROVIDER`, `VITE_PAYMENT_PROVIDER`,
+   `PAYOUT_PROVIDER`, `WASL_MODE`). No Moyasar or Elm credentials of any kind in BETA: preflight
+   blocks them and the runtime guard refuses (migration 021, `docs/beta/BETA_SECURITY.md`).
 5. **Staff accounts** granted with `private.grant_admin` and MFA enrolled.
 6. **pg_cron** enabled (dispatch offer expiry, document expiry, purges) — or the
    `dispatch-tick` function scheduled.
@@ -183,13 +184,13 @@ permissions are proven by DB tests. Not run against a live project (no credentia
 - Admin pages without server backing in live mode: Vehicles (covered by Applications /
   Captains), Zones editing, Marketing (promo management), Reports, Settings.
 - Saved places per device. Rider cannot edit e-mail in-app.
-- Wasl live and Moyasar live/sandbox unverified until credentials exist.
+- Wasl and Moyasar unverified against the real services (BETA is mock-only by policy).
 
 ## 9. Recommendation
 
 **READY WITH LIMITATIONS.** The backend (permissions, trip state machine, dispatch, money,
 compliance) is strongly tested, and the gaps that made live mode show demo data or lose
 messages/tickets are closed. Start a closed BETA (small group of known captains and riders,
-`mock` or Moyasar test payments, `WASL_MODE=mock`) after the §7 checklist is complete and
-preflight is green on the BETA project. Do not take real payments or connect live Wasl until
-those integrations are verified against their sandboxes.
+mock payments, payouts and Wasl only) after the §7 checklist and `docs/beta/BETA_SECURITY.md` §5
+are complete and preflight is green on the BETA project. Moyasar and Elm integrations are verified
+later, in a separate reviewed change — never in this BETA.
