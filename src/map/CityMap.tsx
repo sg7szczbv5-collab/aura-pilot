@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
@@ -31,21 +31,46 @@ export type MapMarker = {
   onClick?: () => void;
 };
 
+export interface MapRoute {
+  id?: string;
+  pts?: LatLng[];
+  path?: LatLng[];
+  width?: number;
+  color?: string;
+}
+
+export interface MapZone {
+  id?: string;
+  center: LatLng;
+  radiusKm?: number;
+  kind?: string;
+  label?: string;
+  active?: boolean;
+  selected?: boolean;
+  onClick?: () => void;
+}
+
+export type RouteInput = MapRoute | LatLng[];
+
 export interface CityMapProps {
   center?: LatLng;
   zoom?: number;
   markers?: MapMarker[];
   route?: LatLng[];
-  routes?: LatLng[][];
-  zones?: unknown[];
+  routes?: RouteInput[];
+  zones?: MapZone[];
+  heat?: LatLng[];
   theme?: 'light' | 'dark' | string;
+  controls?: boolean;
+  labels?: boolean;
   fit?: LatLng[] | boolean;
   fitKey?: string | number;
-  padding?: number | { top?: number; bottom?: number; left?: number; right?: number };
+  padding?: number | number[] | { top?: number; bottom?: number; left?: number; right?: number };
   interactive?: boolean;
-  onPick?: (pos: LatLng) => void;
-  onCenterChange?: (center: LatLng, zoom?: number) => void;
+  onPick?: ((pos: LatLng) => void) | Dispatch<SetStateAction<LatLng>>;
+  onCenterChange?: ((center: LatLng, zoom?: number) => void) | Dispatch<SetStateAction<LatLng>>;
   children?: ReactNode;
+  fallback?: ReactNode;
   className?: string;
 }
 
@@ -56,13 +81,14 @@ const DEFAULT_CENTER: LatLng = {
 
 function getMapboxToken(): string {
   const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-  const nextEnv = typeof process !== 'undefined' ? process.env : undefined;
+  const globalProcess = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } })
+    .process;
 
   return (
     viteEnv?.VITE_MAPBOX_ACCESS_TOKEN ||
     viteEnv?.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ||
-    nextEnv?.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ||
-    nextEnv?.VITE_MAPBOX_ACCESS_TOKEN ||
+    globalProcess?.env?.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ||
+    globalProcess?.env?.VITE_MAPBOX_ACCESS_TOKEN ||
     ''
   );
 }
@@ -78,7 +104,7 @@ function getMarkerColor(marker: MapMarker): string {
   return '#111827';
 }
 
-function createMarkerElement(marker: MapMarker): HTMLDivElement {
+function createMarkerElement(marker: MapMarker, showLabels: boolean): HTMLDivElement {
   const wrapper = document.createElement('div');
   wrapper.style.display = 'flex';
   wrapper.style.flexDirection = 'column';
@@ -116,7 +142,7 @@ function createMarkerElement(marker: MapMarker): HTMLDivElement {
 
   wrapper.appendChild(dot);
 
-  if (marker.label && marker.kind !== 'cluster') {
+  if (showLabels && marker.label && marker.kind !== 'cluster') {
     const badge = document.createElement('span');
     badge.textContent = marker.label;
     badge.style.padding = '2px 6px';
@@ -140,12 +166,40 @@ function createMarkerElement(marker: MapMarker): HTMLDivElement {
   return wrapper;
 }
 
+function normalizePadding(
+  padding: CityMapProps['padding']
+): number | mapboxgl.PaddingOptions {
+  if (typeof padding === 'number') return padding;
+  if (Array.isArray(padding) && padding.length > 0) {
+    const [top = 48, right = 48, bottom = 48, left = 48] = padding;
+    return { top, right, bottom, left };
+  }
+  if (padding && typeof padding === 'object') {
+    return {
+      top: padding.top ?? 48,
+      right: padding.right ?? 48,
+      bottom: padding.bottom ?? 48,
+      left: padding.left ?? 48,
+    };
+  }
+  return 48;
+}
+
+function extractRoutePoints(input: RouteInput): LatLng[] {
+  if (Array.isArray(input)) return input;
+  if (Array.isArray(input.pts)) return input.pts;
+  if (Array.isArray(input.path)) return input.path;
+  return [];
+}
+
 export function CityMap({
   center = DEFAULT_CENTER,
   zoom = 11.5,
   markers = [],
   route = [],
   routes = [],
+  controls = true,
+  labels = true,
   fit,
   fitKey,
   padding,
@@ -153,6 +207,7 @@ export function CityMap({
   onPick,
   onCenterChange,
   children,
+  fallback,
   className = '',
 }: CityMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -179,7 +234,9 @@ export function CityMap({
       interactive,
     });
 
-    map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    if (controls) {
+      map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    }
 
     map.on('click', (e) => {
       onPickRef.current?.({ lat: e.lngLat.lat, lng: e.lngLat.lng });
@@ -187,7 +244,7 @@ export function CityMap({
 
     map.on('moveend', () => {
       const c = map.getCenter();
-      onCenterChangeRef.current?.({ lat: c.lat, lng: c.lng }, map.getZoom());
+      onCenterChangeRef.current?.({ lat: c.lat, lng: c.lng });
     });
 
     mapRef.current = map;
@@ -198,7 +255,7 @@ export function CityMap({
       map.remove();
       mapRef.current = null;
     };
-  }, [token, interactive]);
+  }, [token, interactive, controls]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -213,7 +270,7 @@ export function CityMap({
       });
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds, {
-          padding: typeof padding === 'number' ? padding : 48,
+          padding: normalizePadding(padding),
           maxZoom: 15,
           duration: 500,
         });
@@ -244,7 +301,7 @@ export function CityMap({
           !Number.isNaN(m.pos.lng)
       )
       .map((item) => {
-        const el = createMarkerElement(item);
+        const el = createMarkerElement(item, labels);
         const marker = new mapboxgl.Marker({ element: el })
           .setLngLat([item.pos.lng, item.pos.lat])
           .addTo(map);
@@ -252,7 +309,7 @@ export function CityMap({
       });
 
     markersRef.current = nextMarkers;
-  }, [markers]);
+  }, [markers, labels]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -263,7 +320,7 @@ export function CityMap({
 
     const allPaths: LatLng[][] = [
       ...(route.length >= 2 ? [route] : []),
-      ...routes.filter((path) => Array.isArray(path) && path.length >= 2),
+      ...routes.map(extractRoutePoints).filter((path) => path.length >= 2),
     ];
 
     const features: GeoJSON.Feature[] = allPaths.map((path) => ({
@@ -326,6 +383,7 @@ export function CityMap({
         className={`relative flex h-full min-h-[360px] w-full items-center justify-center rounded-xl border border-amber-500/40 bg-slate-900 p-6 text-center text-sm text-amber-200 ${className}`}
       >
         تعذر العثور على رمز Mapbox العام (`NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN`). تأكد من ضبطه في Vercel وإعادة النشر.
+        {fallback}
         {children}
       </div>
     );
