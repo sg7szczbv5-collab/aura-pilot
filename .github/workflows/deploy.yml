@@ -55,6 +55,8 @@ jobs:
       # The project this run links and deploys to; preflight requires it to equal VITE_SUPABASE_URL's ref,
       # differ from PROD_PROJECT_REF for staging (BETA) and equal it for production.
       SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+      # staging (BETA) builds are bound to this project: the build and preflight fail if VITE_SUPABASE_URL differs.
+      BETA_PROJECT_REF: ${{ vars.BETA_PROJECT_REF }}
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:

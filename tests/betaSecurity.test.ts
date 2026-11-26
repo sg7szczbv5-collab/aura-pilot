@@ -185,7 +185,7 @@ describe('no live call to Moyasar or Elm when the guard fails', () => {
 describe('A12 · preflight and Deploy fail closed', () => {
   const S = (c: string) => c.repeat(40)
   const BASE: Env = {
-    APP_ENV: 'staging', VITE_SUPABASE_URL: url(BETA), SUPABASE_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon-key-value',
+    APP_ENV: 'staging', VITE_SUPABASE_URL: url(BETA), SUPABASE_PROJECT_REF: BETA, BETA_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon-key-value',
     PAYMENTS_CRON_SECRET: S('a'), WASL_CRON_SECRET: S('b'), PRIVACY_CRON_SECRET: S('c'), HEALTH_SECRET: S('d'),
   }
   const blockers = (e: Env, target: 'staging' | 'production' = 'staging', prodRef: string | null = PROD) =>
@@ -291,7 +291,7 @@ describe('F3 · BETA is mock-only everywhere: config template, docs and checks a
   })
 
   it('the template, once filled with placeholder-free values, passes every BETA blocker', () => {
-    const filled = { ...example, VITE_SUPABASE_URL: url(BETA), SUPABASE_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon-key-value',
+    const filled = { ...example, VITE_SUPABASE_URL: url(BETA), SUPABASE_PROJECT_REF: BETA, BETA_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon-key-value',
       PAYMENTS_CRON_SECRET: 'a'.repeat(40), WASL_CRON_SECRET: 'b'.repeat(40), PRIVACY_CRON_SECRET: 'c'.repeat(40), HEALTH_SECRET: 'd'.repeat(40) }
     expect(checkConfig(filled, 'staging', PROD).filter((c) => !c.ok && c.severity === 'blocker').map((c) => c.id)).toEqual([])
   })
