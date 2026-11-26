@@ -6,7 +6,7 @@ The operational reference for deploying, running and recovering AURA. Pair it wi
 
 | Part | Where | Notes |
 |---|---|---|
-| Rider, captain and admin apps | Static hosting (`dist/`) | `dist/_headers` sets CSP, HSTS and caching. SPA with hash routes, so no rewrites needed |
+| Rider, captain and admin apps | Static hosting (`dist/`) | `dist/_headers` (Netlify / Cloudflare) or `vercel.json` (Vercel) sets CSP, HSTS and caching — keep both identical (preflight check `vercel_headers`). SPA with hash routes, so no rewrites needed |
 | Database, Auth, Realtime, Storage | Supabase project | 16 migrations in `supabase/migrations/` (order matters) |
 | `request-ride` | Edge Function (JWT) | Routing (Google Routes), pricing, card authorization, dispatch |
 | `payments` | Edge Function (JWT) | Save card, top-up, tip, 3-D Secure sync |

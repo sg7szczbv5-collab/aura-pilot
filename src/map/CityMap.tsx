@@ -1,8 +1,9 @@
-import { useEffect, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { MAPS_PROVIDER } from '../maps/config';
+import { MAPS_PROVIDER, pxPerKmToGoogleZoom } from '../maps/config';
 import { GoogleCityMap } from '../maps/GoogleCityMap';
+import { VectorCityMap, type VectorCityMapProps, type VectorRoute, type VectorZone } from './VectorCityMap';
 
 export interface LatLng {
   lat: number;
@@ -102,10 +103,29 @@ const DEFAULT_CENTER: LatLng = {
   lng: 46.6753,
 };
 
-function normalizeMapboxZoom(rawZoom: number | undefined): number {
+/**
+ * AURA screens give zoom in pixels per kilometre (22 … 260, the CityMap convention also
+ * used by GoogleCityMap); values ≥ 21 are converted to a Mapbox zoom level (512-px tiles,
+ * hence one level below Google's). Smaller values are taken as a Mapbox zoom already.
+ */
+export function normalizeMapboxZoom(rawZoom: number | undefined, lat = DEFAULT_CENTER.lat): number {
   if (typeof rawZoom !== 'number' || Number.isNaN(rawZoom)) return 11.5;
-  if (rawZoom > 22) return 11.5;
-  return Math.min(Math.max(rawZoom, 2), 20);
+  const z = rawZoom >= 21 ? pxPerKmToGoogleZoom(rawZoom, lat) - 1 : rawZoom;
+  return Math.min(Math.max(z, 2), 20);
+}
+
+const ZONE_COLORS: Record<string, string> = { restricted: '#d64545', high_demand: '#78B83F', airport: '#3f6fd6' };
+
+/** Circle of radiusKm around center as a GeoJSON polygon ring (64 points). */
+function circleRing(center: LatLng, radiusKm: number): [number, number][] {
+  const ring: [number, number][] = [];
+  const dLat = radiusKm / 110.574;
+  const dLng = radiusKm / (111.32 * Math.cos((center.lat * Math.PI) / 180));
+  for (let i = 0; i <= 64; i++) {
+    const a = (i / 64) * 2 * Math.PI;
+    ring.push([center.lng + dLng * Math.cos(a), center.lat + dLat * Math.sin(a)]);
+  }
+  return ring;
 }
 
 function getMapboxToken(): string {
@@ -226,6 +246,8 @@ function MapboxCityMap({
   markers = [],
   route = [],
   routes = [],
+  zones = [],
+  theme = 'light',
   controls = true,
   labels = true,
   fit,
@@ -248,7 +270,10 @@ function MapboxCityMap({
   onCenterChangeRef.current = onCenterChange;
 
   const token = getMapboxToken();
-  const safeZoom = normalizeMapboxZoom(zoom);
+  const safeZoom = normalizeMapboxZoom(zoom, center.lat);
+  const dark = theme === 'dark';
+  /** Token rejected / style not loadable → show the fallback map instead of a blank one. */
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || !token || mapRef.current) return;
@@ -257,7 +282,7 @@ function MapboxCityMap({
 
     const map = new mapboxgl.Map({
       container: containerRef.current,
-      style: 'mapbox://styles/mapbox/streets-v12',
+      style: dark ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/streets-v12',
       center: [center.lng, center.lat],
       zoom: safeZoom,
       interactive,
@@ -274,6 +299,11 @@ function MapboxCityMap({
         'top-right'
       );
     }
+
+    map.on('error', (e) => {
+      const status = (e?.error as { status?: number } | undefined)?.status;
+      if (status === 401 || status === 403) setFailed(true);
+    });
 
     map.on('click', (e) => {
       onPickRef.current?.({ lat: e.lngLat.lat, lng: e.lngLat.lng });
@@ -292,7 +322,35 @@ function MapboxCityMap({
       map.remove();
       mapRef.current = null;
     };
-  }, [token, interactive, controls]);
+  }, [token, interactive, controls, dark]);
+
+  // Zones (service areas, surge, airport, restricted) as translucent circles.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const sourceId = 'aura-zones-source';
+    const data = {
+      type: 'FeatureCollection' as const,
+      features: zones
+        .filter((z) => typeof z.center?.lat === 'number' && z.radiusKm > 0)
+        .map((z) => ({
+          type: 'Feature' as const,
+          properties: { color: ZONE_COLORS[z.kind ?? ''] ?? '#8b8e91', opacity: z.active === false ? 0.04 : 0.12, width: z.selected ? 3 : 1.5 },
+          geometry: { type: 'Polygon' as const, coordinates: [circleRing(z.center, z.radiusKm)] },
+        })),
+    };
+    const apply = () => {
+      const m = mapRef.current;
+      if (!m) return;
+      const src = m.getSource(sourceId) as mapboxgl.GeoJSONSource | undefined;
+      if (src) return src.setData(data as unknown as Parameters<mapboxgl.GeoJSONSource['setData']>[0]);
+      m.addSource(sourceId, { type: 'geojson', data: data as never });
+      m.addLayer({ id: 'aura-zones-fill', type: 'fill', source: sourceId, paint: { 'fill-color': ['get', 'color'], 'fill-opacity': ['get', 'opacity'] } });
+      m.addLayer({ id: 'aura-zones-line', type: 'line', source: sourceId, paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'] } });
+    };
+    if (map.isStyleLoaded()) apply();
+    else map.once('load', apply);
+  }, [zones]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -414,6 +472,8 @@ function MapboxCityMap({
     }
   }, [route, routes]);
 
+  if ((!token || failed) && fallback) return <>{fallback}</>;
+
   if (!token) {
     return (
       <div
@@ -436,14 +496,66 @@ function MapboxCityMap({
   );
 }
 
+const VECTOR_TONES = ['go', 'ink', 'mute'] as const;
+
+/** Current CityMap props → the offline vector map's props. */
+function toVectorProps(p: CityMapProps): VectorCityMapProps {
+  const routes: VectorRoute[] = [
+    ...(p.route?.length ? [{ id: 'route', pts: p.route }] : []),
+    ...(p.routes ?? []).map((r, i): VectorRoute =>
+      Array.isArray(r)
+        ? { id: `r${i}`, pts: r }
+        : {
+            id: r.id ?? `r${i}`,
+            pts: r.pts ?? r.path ?? [],
+            tone: VECTOR_TONES.includes(r.tone as (typeof VECTOR_TONES)[number]) ? (r.tone as VectorRoute['tone']) : 'go',
+            dashed: r.dashed,
+            width: r.width,
+          },
+    ),
+  ];
+  const pad = p.padding;
+  const padding: [number, number, number, number] | undefined =
+    typeof pad === 'number'
+      ? [pad, pad, pad, pad]
+      : Array.isArray(pad)
+        ? pad
+        : pad
+          ? [pad.top ?? 80, pad.right ?? 40, pad.bottom ?? 120, pad.left ?? 40]
+          : undefined;
+  return {
+    theme: p.theme === 'dark' ? 'dark' : 'light',
+    markers: p.markers,
+    routes,
+    zones: p.zones?.map((z, i) => ({ ...z, id: z.id ?? `z${i}`, kind: (z.kind ?? 'service') as VectorZone['kind'] })),
+    heat: p.heat,
+    fit: Array.isArray(p.fit) ? p.fit : undefined,
+    fitKey: p.fitKey == null ? undefined : String(p.fitKey),
+    padding,
+    center: p.center,
+    zoom: p.zoom,
+    interactive: p.interactive,
+    controls: p.controls,
+    labels: p.labels,
+    onPick: p.onPick as ((pos: LatLng) => void) | undefined,
+    onCenterChange: p.onCenterChange as ((c: LatLng) => void) | undefined,
+    className: p.className,
+    children: p.children,
+  };
+}
+
 /**
- * Provider switch: Google Maps when configured (VITE_MAPS_PROVIDER=google and
- * VITE_GOOGLE_MAPS_API_KEY, see src/maps/config.ts), otherwise Mapbox. If Google
- * fails to load (bad key, blocked API, offline) the Mapbox map is shown instead.
+ * Provider switch, with a map always on screen:
+ *   Google Maps — VITE_MAPS_PROVIDER=google + VITE_GOOGLE_MAPS_API_KEY (src/maps/config.ts)
+ *   Mapbox      — VITE_MAPBOX_ACCESS_TOKEN or NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
+ *   offline     — the built-in vector map of Riyadh (no key needed)
+ * Each one falls back to the next if it is not configured or fails to load.
  */
 export function CityMap(props: CityMapProps) {
-  if (MAPS_PROVIDER === 'google') return <GoogleCityMap {...props} fallback={<MapboxCityMap {...props} />} />;
-  return <MapboxCityMap {...props} />;
+  const offline = <VectorCityMap {...toVectorProps(props)} />;
+  const mapbox = getMapboxToken() ? <MapboxCityMap {...props} fallback={offline} /> : offline;
+  if (MAPS_PROVIDER === 'google') return <GoogleCityMap {...props} fallback={mapbox} />;
+  return mapbox;
 }
 
 export default CityMap;

@@ -70,7 +70,8 @@ Super Admin, Operations Manager, Finance Manager, Customer Support, Driver Manag
 
 ## Going to production
 - **Backend:** replace `actions` in `core/store.ts` with API/WebSocket calls; the UI depends only on their signatures. Move OTP, auth, 2FA and sessions server-side.
-- **Maps:** replace `map/CityMap.tsx` with a commercial SDK; all data is already lat/lng.
+- **Maps:** `map/CityMap.tsx` picks the provider and always shows a map — Google Maps (`VITE_MAPS_PROVIDER=google` + `VITE_GOOGLE_MAPS_API_KEY`, optional `VITE_GOOGLE_MAPS_MAP_ID`), else Mapbox (`VITE_MAPBOX_ACCESS_TOKEN` or `NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN`), else the built-in offline map of Riyadh (`map/VectorCityMap.tsx`). Each falls back to the next if it is missing or fails to load. Screens pass zoom in px per km.
+- **Hosting headers:** `public/_headers` (Netlify / Cloudflare) is the source of the security headers (CSP, HSTS, caching); `vercel.json` must carry the same headers because Vercel ignores `_headers`. `npm run preflight` and `tests/stage7.test.ts` fail if the two differ.
 - **Payments:** licensed gateway (mada, Apple Pay, STC Pay); ZATCA e-invoicing for VAT.
 - **Mobile:** the passenger/driver apps are responsive web; `core/` can be shared with a React Native build (see `../masra-rider` for an Expo setup).
 - **Regulatory:** TGA licensing and integration before launch. Tariffs here are placeholders.

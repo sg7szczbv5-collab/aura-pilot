@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MAPS_PROVIDER } from '../../maps/config'
 import { resolvePlace, reverseGeocode, searchLocal, searchPlaces } from '../../maps/places'
-import { etaFromCars, useNearbyCars, useQuotes } from '../../data/liveHooks'
+import { etaFromCars, isPromoError, useNearbyCars, useQuotes } from '../../data/liveHooks'
+import { AUTH_MODE } from '../../auth/config'
 import { trips } from '../../data/tripGateway'
 import { useCards } from '../../payments/PaymentUI'
 import {
@@ -505,7 +506,9 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
   }
 
   const applyPromo = () => {
-    const p = findPromo(promoInput)
+    // Live mode: the server validates the code with the quote (the demo list is not on the server).
+    const code = promoInput.trim().toUpperCase()
+    const p = AUTH_MODE === 'supabase' ? (/^[A-Z0-9_-]{2,32}$/.test(code) ? { code } : undefined) : findPromo(promoInput)
     if (!p) return setPromoErr(t('الرمز غير صالح أو منتهي', 'Invalid or expired code'))
     onChange({ promo: p.code })
     setPromoOpen(false)
@@ -595,7 +598,20 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
           <span className="text-mute">{t('الإجمالي', 'Total')}</span>
           <Money h={q.total} />
         </div>
-        {!draft.scheduleAt && quote.error && <p className="mb-2 text-center text-xs text-danger">{t('تعذّر حساب السعر النهائي، حاول مرة أخرى.', 'Could not get the final price, try again.')}</p>}
+        {!draft.scheduleAt && quote.error && (
+          <div role="alert" className="mb-2 flex items-center justify-center gap-2 text-center text-xs text-danger">
+            <span>{quoteErrorText(quote.error, t)}</span>
+            {isPromoError(quote.error) && draft.promo ? (
+              <button className="font-semibold underline" onClick={() => onChange({ promo: undefined })}>
+                {t('إزالة الخصم', 'Remove code')}
+              </button>
+            ) : (
+              <button className="font-semibold underline" onClick={quote.retry}>
+                {t('إعادة المحاولة', 'Retry')}
+              </button>
+            )}
+          </div>
+        )}
         <Button size="lg" full loading={busy || (!draft.scheduleAt && quote.loading)} disabled={walletShort || (!draft.scheduleAt && !quote.exact)} onClick={confirm}>
           {draft.scheduleAt ? t('تأكيد الجدولة', 'Confirm schedule') : t('تأكيد الرحلة', 'Confirm ride')}
         </Button>
@@ -679,3 +695,18 @@ export function ScheduleSheet({ open, onClose, onPick }: { open: boolean; onClos
   )
 }
 
+
+/** request-ride dry-run error → what the rider can do about it. */
+function quoteErrorText(e: string, t: (ar: string, en: string) => string): string {
+  const s = e.toLowerCase()
+  if (s.includes('promo code is not valid')) return t('رمز الخصم غير صالح.', 'This promo code is not valid.')
+  if (s.includes('fully redeemed')) return t('انتهت صلاحية رمز الخصم.', 'This promo code has been fully used.')
+  if (s.includes('below the promo minimum')) return t('قيمة الرحلة أقل من الحد الأدنى لرمز الخصم.', 'The fare is below the promo minimum.')
+  if (s.includes('already used')) return t('استخدمت رمز الخصم من قبل.', 'You already used this promo code.')
+  if (s.includes('not in service')) return t('الخدمة غير متاحة في هذه المدينة بعد.', 'AURA is not available in this city yet.')
+  if (s.includes('no active tariff')) return t('هذه الفئة غير متاحة حالياً، اختر فئة أخرى.', 'This class is not available right now; pick another.')
+  if (s === 'stops_too_close') return t('نقطتا الانطلاق والوصول متقاربتان جداً.', 'Pickup and destination are too close.')
+  if (s === 'trip_too_long') return t('الرحلة أطول من المسموح (٣٠٠ كم).', 'The trip is longer than allowed (300 km).')
+  if (s === 'unauthorized') return t('انتهت الجلسة، سجّل الدخول مرة أخرى.', 'Your session expired; sign in again.')
+  return t('تعذّر حساب السعر النهائي.', 'Could not get the final price.')
+}
