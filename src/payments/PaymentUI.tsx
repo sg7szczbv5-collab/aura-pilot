@@ -95,7 +95,7 @@ export function AddCardSheet({ open, onClose, riderId, onAdded }: { open: boolea
       window.open(r.verificationUrl, '_blank', 'noopener')
       return
     }
-    setErr(r.error === 'declined' ? t('رُفضت البطاقة', 'Card declined') : r.error === 'invalid_card' ? t('بيانات البطاقة غير صحيحة', 'Invalid card details') : t('تعذّر حفظ البطاقة', 'Could not save the card'))
+    setErr(r.error === 'payments_disabled' ? t('الدفع بالبطاقة غير متاح في هذه البيئة', 'Card payments are not available in this environment') : r.error === 'declined' ? t('رُفضت البطاقة', 'Card declined') : r.error === 'invalid_card' ? t('بيانات البطاقة غير صحيحة', 'Invalid card details') : t('تعذّر حفظ البطاقة', 'Could not save the card'))
   }
   const confirmVerified = async () => {
     if (!verify) return

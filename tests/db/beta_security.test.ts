@@ -892,3 +892,190 @@ describe('F6 · fail closed on integrity failure, automatic recovery when the ch
     expect(r.ok).toBe('ok')
   })
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// Migration 023 — F2 closed: a blocked account is refused at the operation itself
+// ════════════════════════════════════════════════════════════════════════════
+describe('F2 (migration 023) · a token issued before the block is refused at the operation', () => {
+  const V = '2026-11-26'
+  let seq = 0
+  const consent = async (uid: string, app: 'rider' | 'driver') => {
+    const req = app === 'rider' ? ['terms_of_service', 'privacy_policy'] : ['terms_of_service', 'privacy_policy', 'location_tracking', 'regulatory_data_sharing']
+    for (const k of req) await asUser(uid, `select record_consent($1, true, $2, $3)`, [k, V, app === 'rider' ? 'rider_app' : 'driver_app'])
+  }
+  const mkRider = async (phone: string) => { const id = await newUser(phone); await consent(id, 'rider'); return id }
+  const mkCaptain = async (phone: string, lat: number, lng: number) => {
+    seq += 1
+    const id = await newUser(phone)
+    await db.query(`insert into drivers (id, status, city_id, national_id, date_of_birth, iban, approved_at, wasl_status)
+      values ($1, 'approved', (select id from cities where code = 'riyadh'), $2, '1991-02-03', 'SA0380000000608010167519', now(), 'eligible')`, [id, `10${80000000 + seq}`])
+    const v = (await db.query<{ id: string }>(`insert into vehicles (driver_id, vehicle_class, make, model, year, color, plate_letters, plate_number, sequence_number, seats, status, wasl_status)
+      values ($1, 'go', 'Hyundai', 'Elantra', 2024, 'Silver', 'KSA', $2, $3, 4, 'approved', 'eligible') returning id`, [id, String(5000 + seq), String(800000000 + seq)])).rows[0].id
+    await db.query(`update drivers set current_vehicle_id = $2 where id = $1`, [id, v])
+    await db.query(`insert into driver_documents (driver_id, vehicle_id, doc_type, storage_path, status, expires_at)
+      select $1::uuid, case when t in ('vehicle_registration', 'vehicle_insurance') then $2::uuid end, t, $1::text || '/' || t::text || '.jpg', 'approved', '2030-06-30'
+        from unnest(array['national_id', 'driving_license', 'profile_photo', 'vehicle_registration', 'vehicle_insurance']::document_type[]) t`, [id, v])
+    await consent(id, 'driver')
+    await db.query(`update drivers set is_online = true where id = $1`, [id])
+    await asUser(id, `select update_driver_location($1, $2, 90, 0, 8)`, [lat, lng])
+    return id
+  }
+  const credit = (kind: string, owner: string, amt: number) => db.query(
+    `with t as (select gen_random_uuid() id) insert into wallet_ledger (transaction_id, account_id, entry_type, amount_halalas)
+     select t.id, a.id, 'adjustment', v.amt from t, (values ($1::account_type, $3::bigint), ('adjustments'::account_type, -$3::bigint)) v(kind, amt)
+       join wallet_accounts a on a.account_type = v.kind and (a.owner_id = $2 or (a.owner_id is null and v.kind = 'adjustments'))`, [kind, owner, amt])
+  const ride = async (r: string, c: string, lat: number, lng: number) => {
+    const id = (await asUser<{ id: string }>('service', `select (create_ride($1, 'riyadh', 'go', $2, $3, 'A', 24.7633, 46.6407, 'B', 10000, 1200, 'cash')).id`, [r, lat, lng])).id
+    expect((await asUser<{ d: string }>('service', `select dispatch_ride($1) d`, [id])).d).toBe(c)
+    await asUser(c, `select accept_ride($1)`, [id])
+    return id
+  }
+  const toStarted = async (id: string, r: string, c: string) => {
+    await asUser(c, `select transition_ride($1, 'driver_arriving')`, [id])
+    await asUser(c, `select transition_ride($1, 'driver_arrived')`, [id])
+    const code = (await asUser<{ c: string }>(r, `select issue_ride_verification_code($1) c`, [id])).c
+    await asUser(c, `select start_ride($1, $2)`, [id, code])
+  }
+  const blocked = (o: string) => o === 'error:AURA: account is blocked' || o === 'permission_denied'
+
+  let rB: string, cB: string, rOK: string, cOK: string, doneRide: string, liveRide: string, cardB: string, cardOK: string
+  // Each sensitive operation, written once, run for the blocked pair and for an unaffected pair.
+  const ops = (r: string, c: string, card: string, ride0: string) => [
+    ['add_wallet_tip (wallet money)', r, `select add_wallet_tip('${ride0}', 500)`],
+    ['request_payout (money)', c, `select request_payout(10000)`],
+    ['set_default_payment_method', r, `select set_default_payment_method('${card}')`],
+    ['remove_payment_method', r, `select remove_payment_method('${card}')`],
+    ['save_payment_method (service, for the rider)', 'service', `select save_payment_method('${r}', 'mock', 'card', 'tok_f2', 'visa', '4242', 12, 2030)`],
+    ['create_payment_intent (service, top-up)', 'service', `select create_payment_intent('${r}', 'wallet_topup', null, 5000, 'card', 'mock', null)`],
+    ['create_ride (new trip)', 'service', `select create_ride('${r}', 'riyadh', 'go', 24.7136, 46.6753, 'A', 24.76, 46.64, 'B', 10000, 1200, 'cash')`],
+    ['rate_ride', r, `select rate_ride('${ride0}', 4)`],
+    ['RLS: change IBAN', c, `update drivers set iban = 'SA4420000001234567891234' where id = '${c}' returning id`],
+    ['RLS: change bank / city', c, `update drivers set bank_name = 'X' where id = '${c}' returning id`],
+    ['RLS: go online', c, `update drivers set is_online = true where id = '${c}' returning id`],
+    ['RLS: profile name', r, `update profiles set full_name = 'Changed' where id = '${r}' returning id`],
+    ['RLS: rider emergency contact', r, `update riders set emergency_contact_name = 'X', emergency_contact_phone = '966500000000' where id = '${r}' returning id`],
+    ['RLS: rider default card', r, `update riders set default_payment_method_id = null where id = '${r}' returning id`],
+    ['RLS: add vehicle', c, `insert into vehicles (driver_id, vehicle_class, make, model, year, color, plate_letters, plate_number, sequence_number, seats) values ('${c}', 'go', 'Kia', 'K5', 2024, 'Black', 'ABC', '9${seq}1', '7${seq}0000001', 4) returning id`],
+    ['RLS: upload document row', c, `insert into driver_documents (driver_id, doc_type, storage_path) values ('${c}', 'profile_photo', '${c}/x.jpg') returning id`],
+    ['RLS: raw location write', c, `update driver_locations set heading = 1 where driver_id = '${c}' returning driver_id`],
+  ] as const
+
+  beforeAll(async () => {
+    rB = await mkRider('966557000001'); cB = await mkCaptain('966557000002', 24.7136, 46.6753)
+    rOK = await mkRider('966557000003'); cOK = await mkCaptain('966557000004', 24.80, 46.70)
+    // Blocked pair: one finished trip (for tip / rating) and one trip in progress at block time.
+    doneRide = await ride(rB, cB, 24.7136, 46.6753); await toStarted(doneRide, rB, cB)
+    await asUser(cB, `select transition_ride($1, 'completed')`, [doneRide])
+    liveRide = await ride(rB, cB, 24.7136, 46.6753); await toStarted(liveRide, rB, cB)
+    const okRide = await ride(rOK, cOK, 24.80, 46.70); await toStarted(okRide, rOK, cOK)
+    await asUser(cOK, `select transition_ride($1, 'completed')`, [okRide])
+    for (const [k, id] of [['rider_wallet', rB], ['rider_wallet', rOK], ['driver_wallet', cB], ['driver_wallet', cOK]] as const) await credit(k, id, 60000)
+    cardB = (await db.query<{ id: string }>(`select (save_payment_method($1, 'mock', 'card', 'tok_b', 'visa', '4242', 12, 2030)).id`, [rB])).rows[0].id
+    cardOK = (await db.query<{ id: string }>(`select (save_payment_method($1, 'mock', 'card', 'tok_ok', 'visa', '4242', 12, 2030)).id`, [rOK])).rows[0].id
+    ;(globalThis as Record<string, unknown>).__okRide = okRide
+  })
+
+  it('before the block, the same tokens can do every operation (proves the token is valid)', async () => {
+    for (const [label, who, sql] of ops(rB, cB, cardB, doneRide)) {
+      if (label.startsWith('create_ride')) continue // the rider has a trip in progress (one active ride rule)
+      const o = await attempt(who, sql)
+      expect(o === 'ok' || (o.startsWith('error:') && !blocked(o)), `${label}: ${o}`).toBe(true)
+    }
+  })
+
+  it('after revoke_tester, each one is refused with the same token — and nothing was written', async () => {
+    const res = (await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('966557000001') r`)).rows[0].r
+    expect(res).toMatchObject({ blocked: 1, allowlist_removed: true })
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('966557000002') r`)).rows[0].r).toMatchObject({ blocked: 1 })
+    // revoke_tester took the captain offline at once.
+    expect((await db.query<{ o: boolean }>(`select is_online o from drivers where id = $1`, [cB])).rows[0].o).toBe(false)
+    const before = (await db.query(`select (select count(*) from payouts)::int po, (select count(*) from wallet_ledger)::int l, (select iban from drivers where id = '${cB}') iban`)).rows[0]
+    for (const [label, who, sql] of ops(rB, cB, cardB, doneRide)) {
+      const o = await attempt(who, sql)
+      expect(blocked(o), `${label}: ${o}`).toBe(true)
+    }
+    // Committed (not rolled back) attempts too: still nothing changes.
+    await expect(asUser(cB, `select request_payout(10000)`)).rejects.toThrow(/account is blocked/)
+    await expect(asUser(rB, `select add_wallet_tip($1, 500)`, [doneRide])).rejects.toThrow(/account is blocked/)
+    await expect(asUser(cB, `update drivers set iban = 'SA4420000001234567891234' where id = $1`, [cB])).rejects.toThrow(/account is blocked/)
+    expect((await db.query(`select (select count(*) from payouts)::int po, (select count(*) from wallet_ledger)::int l, (select iban from drivers where id = '${cB}') iban`)).rows[0]).toEqual(before)
+  })
+
+  it('a blocked user cannot unblock or re-allowlist themselves', async () => {
+    expect(blocked(await attempt(rB, `update profiles set is_blocked = false where id = '${rB}'`))).toBe(true)
+    expect(await attempt(rB, `select ops_guard.allow_tester('966557000001')`)).toBe('permission_denied')
+    expect((await asUser<{ s: Record<string, unknown> }>('service', `select ops_runtime_config() s`)).s).toBeTruthy()
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.hook_custom_access_token($1) r`, [JSON.stringify({ user_id: rB, claims: { sub: rB } })])).rows[0].r)
+      .toMatchObject({ error: { http_code: 403 } }) // and the token is not refreshed
+  })
+
+  it('the trip already in progress can still be finished safely (chat, share, going offline, completion)', async () => {
+    expect(await attempt(rB, `insert into ride_messages (ride_id, body) values ('${liveRide}', 'arriving soon')`)).toBe('ok')
+    expect(await attempt(rB, `select create_trip_share('${liveRide}')`)).toMatch(/^(ok|error:(?!AURA: account is blocked))/)
+    expect(await attempt(cB, `update drivers set is_online = false where id = '${cB}' returning id`)).toBe('ok')
+    const mixed = await attempt(cB, `update drivers set is_online = false, iban = 'SA4420000001234567891234' where id = '${cB}'`)
+    expect(blocked(mixed), mixed).toBe(true)
+    const done = await asUser<{ s: string }>(cB, `select (transition_ride($1, 'completed')).status s`, [liveRide])
+    expect(done.s).toBe('completed')
+    // …but no new trip: a new offer cannot be accepted and no new ride can be created.
+    expect(blocked(await attempt('service', `select create_ride('${rB}', 'riyadh', 'go', 24.7136, 46.6753, 'A', 24.76, 46.64, 'B', 10000, 1200, 'cash')`))).toBe(true)
+  })
+
+  it('an account that is not blocked is not affected at all', async () => {
+    const okRide = (globalThis as Record<string, unknown>).__okRide as string
+    for (const [label, who, sql] of ops(rOK, cOK, cardOK, okRide)) {
+      const o = await attempt(who, sql)
+      expect(o === 'ok' || (o.startsWith('error:') && !blocked(o)), `${label}: ${o}`).toBe(true)
+    }
+  })
+
+  it('session and refresh-token deletion failing separately never weakens the block', async () => {
+    for (const deny of ['sessions', 'refresh_tokens'] as const) {
+      const phone = deny === 'sessions' ? '966557100001' : '966557100002'
+      const u = await mkRider(phone)
+      const out = await inTx([
+        `create table auth.sessions (id uuid primary key default gen_random_uuid(), user_id uuid not null)`,
+        `create table auth.refresh_tokens (id bigserial primary key, user_id varchar(255), token text)`,
+        `insert into auth.sessions (user_id) values ('${u}')`, `insert into auth.refresh_tokens (user_id, token) values ('${u}', 't')`,
+        `create function auth.deny_delete() returns trigger language plpgsql as $$ begin raise exception 'permission denied' using errcode = '42501'; end $$`,
+        `create trigger deny before delete on auth.${deny} for each row execute function auth.deny_delete()`,
+      ], async (tx) => {
+        const r = await val<Record<string, string>>(tx, `select ops_guard.revoke_tester('${phone}') v`)
+        await tx.query(`select set_config('request.jwt.claim.sub', $1, true), set_config('request.jwt.claims', $2, true)`, [u, JSON.stringify({ sub: u, role: 'authenticated' })])
+        await tx.exec(`set local role authenticated`)
+        const op = await tx.query(`select set_default_payment_method(gen_random_uuid())`).then(() => 'ok', (e: Error) => e.message)
+        return { r, op }
+      })
+      expect(out.r[deny], deny).toBe('failed:42501')
+      expect(out.r[deny === 'sessions' ? 'refresh_tokens' : 'sessions'], deny).toBe('deleted:1')
+      expect(out.op, deny).toMatch(/account is blocked/)
+    }
+  })
+
+  // Regression guard: any future user-callable function or RLS-writable table must be classified.
+  it('every user-callable writer checks the block or is on the reviewed "finish safely / legal right" list', async () => {
+    const ALLOWED_WHILE_BLOCKED = new Set(['cancel_privacy_request', 'create_trip_share', 'decline_ride', 'export_my_data', 'issue_ride_verification_code',
+      'record_consent', 'report_safety_incident', 'revoke_trip_share', 'start_ride', 'submit_privacy_request', 'trip_share_view'])
+    const r = await db.query<{ proname: string; src: string }>(
+      `select p.proname, p.prosrc src from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and has_function_privilege('authenticated', p.oid, 'EXECUTE')
+          and (p.prosrc ~* '(insert\\s+into|update|delete\\s+from)\\s+public\\.' or p.prosrc ~* 'post_entry')`)
+    const unguarded = r.rows.filter((x) => !/assert_not_blocked|is_blocked|admin_can|is_admin|is_approved_driver/.test(x.src) && !ALLOWED_WHILE_BLOCKED.has(x.proname))
+    expect(unguarded.map((x) => x.proname)).toEqual([])
+    const t = await db.query<{ t: string }>(
+      `select distinct tablename t from pg_policies where schemaname = 'public' and cmd in ('INSERT', 'UPDATE', 'DELETE', 'ALL')
+          and 'authenticated' = any (roles)
+          and not exists (select 1 from pg_trigger g where g.tgrelid = ('public.' || tablename)::regclass and g.tgname = 'aa_blocked_actor' and g.tgenabled = 'A')
+          and coalesce(qual, '') || coalesce(with_check, '') !~ '(admin_can|is_admin)' order by 1`)
+    // Support, safety and in-trip chat stay open to a blocked account on purpose.
+    expect(t.rows.map((x) => x.t)).toEqual(['ride_messages', 'tickets'])
+  })
+
+  it('the integrity check watches the F2 controls', async () => {
+    const a = await peek<{ r: { failures: string[] } }>('owner', `select ops_guard.integrity_check() r`, [], [`alter table public.drivers disable trigger aa_blocked_actor`])
+    expect(a.r.failures).toContain('trigger_not_always:public.drivers.aa_blocked_actor')
+    const b = await peek<{ r: { failures: string[] } }>('owner', `select ops_guard.integrity_check() r`, [],
+      [`create or replace function public.rate_ride(p_ride_id uuid, p_stars integer, p_feedback text default null) returns void language plpgsql security definer set search_path = '' as $$ begin perform ops_guard.assert_environment('x'); end $$`])
+    expect(b.r.failures).toContain('blocked_check_missing:rate_ride')
+  })
+})

@@ -30,11 +30,12 @@ External services:
 | | development | staging | production |
 |---|---|---|---|
 | Supabase | none (demo store) or local | its own project | its own project in the closest region (check PDPL data residency) |
-| Payments | mock | Moyasar **test** keys | Moyasar **live** keys |
-| Wasl | mock | mock, or Elm sandbox | **live** |
+| Payments | mock | **mock only** (no Moyasar key of any kind) | Moyasar **live** keys |
+| Payouts | mock | **mock only** | bank / provider |
+| Wasl | mock | **mock only** (no Elm credentials) | **live** |
 | Maps | offline map | Google (test key) | Google (restricted keys) |
 
-`npm run preflight -- --target <env> --env-file <file>` enforces these rules: test keys in production, or mock providers in production, are blockers.
+`npm run preflight -- --target <env> --env-file <file>` enforces these rules: test keys or mock providers in production are blockers, and in staging (the closed BETA) any Moyasar setting, any non-mock provider and any Elm credential is a blocker. A staging / BETA / Vercel Preview **build** also fails on any Moyasar setting, and the browser refuses to contact a payment gateway (`src/payments/paymentPolicy.ts`, `networkGuard.ts`). Moyasar and Elm are tested against their sandboxes only in a separate, reviewed environment — never in staging. See `docs/beta/BETA_SECURITY.md`.
 
 ## 3. Deploy procedure (staging first, always)
 
@@ -134,7 +135,7 @@ After any rotation, run `npm run preflight -- --target production --env-file …
 ## 9. Manual smoke test (staging, ~15 minutes)
 
 1. Rider signs up with phone OTP, sees the consent screen, accepts, and checks the legal documents open.
-2. Rider adds the test card `4111 1111 1111 1111`, sees an upfront price, and requests a card ride.
+2. Rider adds the **mock** test card `4111 1111 1111 1111` (staging is mock-only: no card data leaves the browser), sees an upfront price, and requests a card ride.
 3. On a second phone, a test captain (approved, Wasl mock eligible) goes online. Check location permission: there's a banner if denied.
 4. Captain accepts, arrives; the rider shares the trip (open the link signed out) and shows the PIN; the captain starts, drives, completes.
 5. Within a minute the ride is captured and settled, and the captain's statement shows the earning.

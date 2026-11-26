@@ -67,7 +67,8 @@ npx supabase secrets set PAYMENT_PROVIDER=moyasar MOYASAR_SECRET_KEY=sk_test_...
   MOYASAR_WEBHOOK_SECRET=... PAYMENT_CALLBACK_URL=https://your-domain/#/passenger PAYMENTS_CRON_SECRET=...
 ```
 
-- **App:** set `VITE_MOYASAR_PUBLISHABLE_KEY=pk_test_...`. Without it the app uses mock tokens, so the server must then run `PAYMENT_PROVIDER=mock`.
+- **App:** set `VITE_PAYMENT_PROVIDER=moyasar` **and** `VITE_MOYASAR_PUBLISHABLE_KEY=pk_…`. The key alone does not enable Moyasar; without both the app uses mock tokens, so the server must then run `PAYMENT_PROVIDER=mock`.
+- **Never in staging / BETA / Vercel Preview:** those environments are mock-only. Preflight, the build (`vite.config.ts`), the browser network guard and the Edge runtime guard all refuse any Moyasar setting there (`docs/beta/BETA_SECURITY.md`). Use test keys only on a developer machine or a separate, reviewed sandbox environment.
 - **Moyasar dashboard:** set the webhook URL to `…/functions/v1/payments-webhook` with the same secret token, and enable mada, Visa/Mastercard and Apple Pay (merchant validation).
 - **Scheduler:** call `payments-worker` every minute (Supabase Cron → HTTP request) with the header `x-cron-secret`.
 
