@@ -9,6 +9,7 @@ import { CITIES, cityById } from '../../../core/geo'
 import { day, int, sar } from '../../../core/format'
 import type { CityId, Driver, DriverDoc, VehicleClassId } from '../../../core/types'
 import { Can, DataTable, Drawer, FilterChips, KV, PageHeader, useAdmin, type Col } from '../kit'
+import { RejectionReasonDropdown } from '../components/RejectionReasonDropdown'
 import { driverStats } from '../analytics'
 import { hashQuery } from '../../../app/router'
 
@@ -143,7 +144,7 @@ function DriverDrawer({ driver, stats, onClose }: { driver?: Driver; stats?: Ret
           <>
             {(driver.status === 'pending_review' || driver.status === 'incomplete') && (
               <Can perm="drivers.approve">
-                <Button variant="secondary" size="sm" icon={<X size={15} />} onClick={() => setRejecting(true)}>
+                <Button variant="secondary" size="sm" icon={<X size={15} />} onClick={() => { setReason(''); setRejecting(true) }}>
                   {t('رفض التسجيل', 'Reject')}
                 </Button>
                 <Button size="sm" icon={<Check size={15} />} disabled={!allDocsOk} onClick={() => { actions.setDriverStatus(driver.id, 'approved', admin); toast(t('تم قبول الكابتن وإشعاره', 'Captain approved and notified')) }}>
@@ -173,10 +174,8 @@ function DriverDrawer({ driver, stats, onClose }: { driver?: Driver; stats?: Ret
         <div className="space-y-5">
           {rejecting && (
             <div className="rounded-2xl bg-danger-soft p-4">
-              <Field label={t('سبب الرفض (يظهر للكابتن)', 'Reason (shown to captain)')}>
-                <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t('مثال: صورة الرخصة غير واضحة', 'e.g. licence photo unclear')} />
-              </Field>
-              <Button variant="danger" size="sm" className="mt-3" disabled={reason.trim().length < 4} onClick={() => { actions.setDriverStatus(driver.id, 'rejected', admin, reason); setRejecting(false); toast(t('تم رفض الطلب', 'Application rejected'), 'info') }}>
+              <RejectionReasonDropdown key={driver.id} label={t('سبب الرفض (يظهر للكابتن)', 'Reason (shown to captain)')} onChange={setReason} />
+              <Button variant="danger" size="sm" className="mt-3" disabled={!reason.trim()} onClick={() => { actions.setDriverStatus(driver.id, 'rejected', admin, reason); setRejecting(false); toast(t('تم رفض الطلب', 'Application rejected'), 'info') }}>
                 {t('تأكيد الرفض', 'Confirm rejection')}
               </Button>
             </div>

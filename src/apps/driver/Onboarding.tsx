@@ -43,10 +43,10 @@ const STEPS: Step[] = ['personal', 'id_docs', 'vehicle', 'vehicle_docs']
 const DEMO_CODE = auth.demoCode('driver')
 
 /** Login + 4-step captain application. Demo: 55 123 4567 signs in as the approved captain. */
-export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
+export function DriverAuth({ onAuthed, reapplyPhone }: { onAuthed: (id: string) => void; /** Demo re-application: skip sign-in and reuse this 9-digit number. */ reapplyPhone?: string }) {
   const { t, lang } = useI18n()
-  const [step, setStep] = useState<Step>('phone')
-  const [phone, setPhone] = useState('551234567')
+  const [step, setStep] = useState<Step>(reapplyPhone ? 'personal' : 'phone')
+  const [phone, setPhone] = useState(reapplyPhone ?? '551234567')
   const [code, setCode] = useState('')
   const [err, setErr] = useState(false)
   const [errText, setErrText] = useState('')
@@ -465,8 +465,40 @@ function UploadTile({ label, file, onFile, icon }: { label: string; file?: strin
   )
 }
 
+/** «لم يتم قبول الطلب»: the reason(s) in a card, or a default explanation, plus re-apply / log out. */
+function RejectedScreen({ tag, reasons, fallback, onReapply, onLogout }: { tag?: React.ReactNode; reasons: string[]; fallback: string; onReapply?: () => void; onLogout: () => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink px-8 text-center text-white">
+      <XCircle size={68} className="text-danger" strokeWidth={1.5} />
+      <h1 className="mt-5 font-display text-2xl font-semibold">{t('لم يتم قبول الطلب', 'Application not approved')}</h1>
+      {tag && <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-3 py-1 text-xs font-semibold text-danger">{tag}</span>}
+      <div className="mt-5 w-full rounded-2xl bg-ink-2 p-4 text-start">
+        <p className="text-xs font-semibold text-white/45">{t('سبب الرفض', 'Reason')}</p>
+        {reasons.length ? (
+          <ul className="mt-1.5 space-y-1.5 text-sm text-white/85">
+            {reasons.map((l, i) => (
+              <li key={i}>{l}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1.5 text-sm text-white/70">{fallback}</p>
+        )}
+      </div>
+      {onReapply && (
+        <Button variant="go" size="lg" full className="mt-8" onClick={onReapply}>
+          {t('تعديل الطلب وإعادة التقديم', 'Edit and re-apply')}
+        </Button>
+      )}
+      <Button variant="secondary" size="lg" full className={onReapply ? 'mt-3' : 'mt-8'} onClick={onLogout}>
+        {t('تسجيل الخروج', 'Log out')}
+      </Button>
+    </div>
+  )
+}
+
 /** Live application status (updates the moment Admin approves or rejects). */
-export function ApplicationStatus({ driverId, onApproved, onLogout }: { driverId: string; onApproved: () => void; onLogout: () => void }) {
+export function ApplicationStatus({ driverId, onApproved, onLogout, onReapply }: { driverId: string; onApproved: () => void; onLogout: () => void; onReapply?: () => void }) {
   const { t, L } = useI18n()
   useEco((s) => s.rev)
   const d = getDriver(driverId)
@@ -500,46 +532,29 @@ export function ApplicationStatus({ driverId, onApproved, onLogout }: { driverId
     // The application-level note, when it says something the vehicle reasons do not.
     if (d.status === 'rejected' && d.rejectionReason && !lines.some((l) => l.includes(d.rejectionReason!.trim()))) lines.push(d.rejectionReason)
     return (
-      <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink px-8 text-center text-white">
-        <XCircle size={68} className="text-danger" strokeWidth={1.5} />
-        <h1 className="mt-5 font-display text-2xl font-semibold">{t('لم يتم قبول الطلب', 'Application not approved')}</h1>
-        <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-3 py-1 text-xs font-semibold text-danger">
-          <Car size={14} /> {t('المركبة', 'Vehicle')}
-        </span>
-        <div className="mt-5 w-full rounded-2xl bg-ink-2 p-4 text-start">
-          <p className="text-xs font-semibold text-white/45">{t('سبب الرفض', 'Reason')}</p>
-          {lines.length ? (
-            <ul className="mt-1.5 space-y-1.5 text-sm text-white/85">
-              {lines.map((l, i) => (
-                <li key={i}>{l}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-1.5 text-sm text-white/70">
-              {t(
-                'لم تستوفِ المركبة متطلبات التسجيل في أورا. راجع بيانات المركبة واستمارتها وتأمينها، أو تواصل مع الدعم لمعرفة التفاصيل.',
-                'Your vehicle did not meet AURA registration requirements. Please check the vehicle details, registration and insurance, or contact support for details.',
-              )}
-            </p>
-          )}
-        </div>
-        <Button variant="secondary" size="lg" full className="mt-8" onClick={onLogout}>
-          {t('تسجيل الخروج', 'Log out')}
-        </Button>
-      </div>
+      <RejectedScreen
+        tag={<><Car size={14} /> {t('المركبة', 'Vehicle')}</>}
+        reasons={lines}
+        fallback={t(
+          'لم تستوفِ المركبة متطلبات التسجيل في أورا. راجع بيانات المركبة واستمارتها وتأمينها، أو تواصل مع الدعم لمعرفة التفاصيل.',
+          'Your vehicle did not meet AURA registration requirements. Please check the vehicle details, registration and insurance, or contact support for details.',
+        )}
+        onReapply={onReapply}
+        onLogout={onLogout}
+      />
     )
   }
-  if (d.status === 'rejected')
+  if (d.status === 'rejected') {
+    const docReasons = d.docs.filter((x) => x.status === 'rejected' && x.note).map((x) => `${docLabel[x.id]}: ${x.note === 'expired' ? t('منتهية الصلاحية', 'Expired') : x.note}`)
     return (
-      <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink px-8 text-center text-white">
-        <XCircle size={68} className="text-danger" strokeWidth={1.5} />
-        <h1 className="mt-5 font-display text-2xl font-semibold">{t('لم يتم قبول الطلب', 'Application not approved')}</h1>
-        <p className="mt-2 text-sm text-white/55">{d.rejectionReason ?? t('يرجى مراجعة المستندات وإعادة التقديم.', 'Please review your documents and re-apply.')}</p>
-        <Button variant="secondary" size="lg" full className="mt-8" onClick={onLogout}>
-          {t('تسجيل الخروج', 'Log out')}
-        </Button>
-      </div>
+      <RejectedScreen
+        reasons={[...(d.rejectionReason?.trim() ? [d.rejectionReason.trim()] : []), ...docReasons]}
+        fallback={t('لم يستوفِ طلبك متطلبات التسجيل. يرجى مراجعة بياناتك ومستنداتك ثم إعادة التقديم.', 'Your application did not meet the registration requirements. Please review your details and documents, then re-apply.')}
+        onReapply={onReapply}
+        onLogout={onLogout}
+      />
     )
+  }
   return (
     <div className="absolute inset-0 flex flex-col bg-ink text-white">
       <TopBar title={t('حالة الطلب', 'Application status')} />
