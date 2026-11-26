@@ -163,6 +163,8 @@ export type Driver = {
   cityId: CityId
   status: DriverAccountStatus
   rejectionReason?: string
+  /** Server review of the captain's current vehicle (vehicles.status / vehicles.status_reason). */
+  vehicleReview?: { status: 'pending_review' | 'approved' | 'rejected' | 'inactive'; reason?: string }
   online: boolean
   rating: number
   ratingsCount: number

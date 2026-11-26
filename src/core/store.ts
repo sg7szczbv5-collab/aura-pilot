@@ -730,6 +730,19 @@ export const actions = {
     })
   },
 
+  /**
+   * Demo: a rejected captain withdraws the application to submit a corrected one.
+   * Removes the captain and the vehicle so the same phone number can register again.
+   */
+  withdrawDriverApplication(driverId: string) {
+    store.commit((s) => {
+      const d = s.drivers.find((x) => x.id === driverId)
+      if (!d || (d.status !== 'rejected' && d.status !== 'incomplete')) return
+      s.drivers = s.drivers.filter((x) => x.id !== driverId)
+      s.vehicles = s.vehicles.filter((v) => v.driverId !== driverId && v.id !== d.vehicleId)
+    })
+  },
+
   setDocStatus(driverId: string, docId: DriverDoc['id'], status: DriverDoc['status'], admin: AdminUser) {
     store.commit((s) => {
       const d = s.drivers.find((x) => x.id === driverId)
