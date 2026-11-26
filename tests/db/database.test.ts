@@ -1210,3 +1210,50 @@ describe('Stage 7: ops_readiness', () => {
     expect((await report()).ok).toBe(true)
   })
 })
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('admin console: direct document rejection (migration 016)', () => {
+  let cap: string
+  let docId: string
+  const reject = (who: string, reason: string | null, reviewer: string | null, opts: { aal?: 'aal1' | 'aal2' } = {}) =>
+    as(who, async (tx) => (await tx.query<{ id: string; status: string; rejection_reason: string; reviewed_at: string }>(
+      `update driver_documents
+          set status = 'rejected', rejection_reason = $2, reviewed_at = now(), updated_at = now(), reviewed_by = $3
+        where id = $1 and status = 'uploaded'
+        returning id, status, rejection_reason, reviewed_at`, [docId, reason, reviewer])).rows, opts)
+
+  beforeAll(async () => {
+    cap = await newUser('966544100001', 'Reject Test Captain')
+    await db.query(
+      `insert into drivers (id, status, city_id, national_id, date_of_birth, iban)
+       values ($1, 'pending_review', (select id from cities where code = 'riyadh'), '1088888881', '1992-01-01', 'SA0380000000608010167519')`, [cap])
+    docId = (await db.query<{ id: string }>(
+      `insert into driver_documents (driver_id, doc_type, storage_path, expires_at)
+       values ($1::uuid, 'driving_license', $1::text || '/driving_license.jpg', '2030-06-30') returning id`, [cap])).rows[0].id
+  })
+
+  it('captains, support staff and non-MFA sessions cannot change a document', async () => {
+    expect(await reject(cap, 'x', cap)).toEqual([]) // captain: policy USING fails → no row matched
+    expect(await reject(support, 'x', support)).toEqual([]) // no drivers.edit → row not matched
+    expect(await reject(driverManager, 'x', driverManager, { aal: 'aal1' })).toEqual([])
+    await expect(as(driverManager, (tx) => tx.query(`update driver_documents set storage_path = 'x' where id = $1`, [docId])))
+      .rejects.toThrow(/permission denied/)
+    expect((await db.query<{ status: string }>(`select status from driver_documents where id = $1`, [docId])).rows[0].status).toBe('uploaded')
+  })
+
+  it('a reason and reviewed_by = caller are required, and only uploaded → rejected is allowed', async () => {
+    await expect(reject(driverManager, '   ', driverManager)).rejects.toThrow(/row-level security/)
+    await expect(reject(driverManager, 'x', superAdmin)).rejects.toThrow(/row-level security/)
+    await expect(as(driverManager, (tx) => tx.query(`update driver_documents set status = 'approved', reviewed_by = $2 where id = $1`, [docId, driverManager])))
+      .rejects.toThrow(/row-level security/)
+  })
+
+  it('driver manager rejects with the final reason; a second reject matches nothing', async () => {
+    const [r] = await reject(driverManager, 'عدم تطابق البيانات', driverManager)
+    expect(r).toMatchObject({ id: docId, status: 'rejected', rejection_reason: 'عدم تطابق البيانات' })
+    expect(r.reviewed_at).toBeTruthy()
+    expect(await reject(driverManager, 'again', driverManager)).toEqual([])
+    const a = await rows<{ action: string }>(superAdmin, `select action from audit_log where entity_id = $1`, [docId])
+    expect(a.length).toBeGreaterThan(0)
+  })
+})
