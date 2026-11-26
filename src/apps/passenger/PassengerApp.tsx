@@ -18,6 +18,7 @@ import { PassengerAuth, PassengerSplash } from './Auth'
 import { ConfirmScreen, DestinationScreen, MapPickScreen, PassengerHome, ScheduleSheet, VehiclesScreen, type BookingDraft } from './Booking'
 import { CancelledNotice, LiveTripScreen, SearchingScreen, TripDoneScreen } from './LiveTrip'
 import { AccountTab, InboxPanel, TripsTab, WalletTab } from './Tabs'
+import { AUTH_MODE } from '../../auth/config'
 
 type Tab = 'home' | 'trips' | 'wallet' | 'account'
 type Step = 'destination' | 'pick' | 'vehicles' | 'confirm'
@@ -47,7 +48,7 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
   useEco((s) => s.rev) // re-render on any store change
   const customer = getCustomer(pid)
   const all = useAllTrips()
-  const inboxCount = useEco((s) => s.inbox.filter((i) => (i.to === 'all' || i.to === 'passengers') && i.at > seen).length)
+  const inboxCount = useEco((s) => (AUTH_MODE === 'supabase' ? 0 : s.inbox.filter((i) => (i.to === 'all' || i.to === 'passengers') && i.at > seen).length))
 
   const trip: Trip | undefined = useMemo(
     () =>

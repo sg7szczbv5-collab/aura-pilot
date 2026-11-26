@@ -216,7 +216,7 @@ export function WalletTab({ customer }: { customer: Customer }) {
   const { t, L, lang } = useI18n()
   const toast = useToast()
   const all = useAllTrips()
-  const promos = useEco((s) => s.promos.filter((p) => p.active && p.endsAt > Date.now() && (p.audience === 'all' || (p.audience === 'gold' && customer.tier === 'gold') || p.audience === 'new')))
+  const promos = useEco((s) => (AUTH_MODE === 'supabase' ? [] : s.promos).filter((p) => p.active && p.endsAt > Date.now() && (p.audience === 'all' || (p.audience === 'gold' && customer.tier === 'gold') || p.audience === 'new')))
   const [topup, setTopup] = useState(false)
   const [amount, setAmount] = useState(10000)
   const [topBusy, setTopBusy] = useState(false)
@@ -482,7 +482,7 @@ function ProfilePanel({ customer, onClose }: { customer: Customer; onClose: () =
 
 function OffersList({ customer }: { customer: Customer }) {
   const { t, L, lang } = useI18n()
-  const promos = useEco((s) => s.promos.filter((p) => p.active && p.endsAt > Date.now()))
+  const promos = useEco((s) => (AUTH_MODE === 'supabase' ? [] : s.promos).filter((p) => p.active && p.endsAt > Date.now()))
   if (!promos.length) return <EmptyState icon={<Gift size={26} />} title={t('لا توجد عروض حالياً', 'No offers right now')} />
   return (
     <div className="space-y-2 pt-2">
@@ -706,7 +706,8 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 
 export function InboxPanel({ audience, onClose }: { audience: 'passengers' | 'captains'; onClose: () => void }) {
   const { t, L, lang } = useI18n()
-  const items = useEco((s) => s.inbox.filter((i) => i.to === 'all' || i.to === audience))
+  // Live mode: no notification service on the server yet — never show the demo broadcasts.
+  const items = useEco((s) => (AUTH_MODE === 'supabase' ? [] : s.inbox.filter((i) => i.to === 'all' || i.to === audience)))
   return (
     <Panel title={t('الإشعارات', 'Notifications')} onClose={onClose}>
       {items.length === 0 && <EmptyState icon={<Bell size={26} />} title={t('لا توجد إشعارات', 'No notifications')} />}
