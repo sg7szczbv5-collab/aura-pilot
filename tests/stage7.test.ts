@@ -17,7 +17,7 @@ const S = (n: string) => n.repeat(40)
 
 const PROD: Env = {
   APP_ENV: 'production',
-  VITE_SUPABASE_URL: 'https://abcdefgh.supabase.co',
+  VITE_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
   VITE_SUPABASE_ANON_KEY: jwt('anon'),
   SUPABASE_SERVICE_ROLE_KEY: jwt('service_role'),
   VITE_AUTH_OTP_LENGTH: '6',
@@ -39,14 +39,21 @@ const PROD: Env = {
   WASL_APP_ID: 'app',
   WASL_APP_KEY: 'key',
 }
+/** These tests model a production ref that has been verified; the shipped constant is still null (see below). */
+const VERIFIED_REF = 'abcdefghijklmnopqrst'
 const failing = (env: Env, target: 'production' | 'staging' | 'development' = 'production') =>
-  checkConfig(env, target).filter((c) => !c.ok && c.severity === 'blocker').map((c) => c.id)
+  checkConfig(env, target, VERIFIED_REF).filter((c) => !c.ok && c.severity === 'blocker').map((c) => c.id)
 
 describe('production configuration checks', () => {
-  it('a complete production configuration is ready', () => {
-    const checks = checkConfig(PROD, 'production')
+  it('a complete production configuration is ready once the production ref is verified', () => {
+    const checks = checkConfig(PROD, 'production', VERIFIED_REF)
     expect(checks.filter((c) => !c.ok)).toEqual([])
     expect(summarize(checks).ok).toBe(true)
+  })
+
+  it('with the shipped (unverified, null) PROD_PROJECT_REF a production deploy is blocked — by that alone', () => {
+    const blockers = checkConfig(PROD, 'production').filter((c) => !c.ok && c.severity === 'blocker').map((c) => c.id)
+    expect(blockers).toEqual(['production_binding'])
   })
 
   it('catches secrets leaking into the browser bundle variables', () => {
@@ -65,8 +72,11 @@ describe('production configuration checks', () => {
     expect(failing({ ...PROD, WASL_MODE: 'mock' })).toEqual(['wasl_mode'])
     expect(failing({ ...PROD, WASL_API_BASE_URL: 'http://insecure' })).toEqual(['wasl_config'])
     expect(failing({ ...PROD, PAYMENT_CALLBACK_URL: 'http://localhost:5180/#/passenger' })).toEqual(['payment_callback'])
-    const staging = { ...PROD, APP_ENV: 'staging', MOYASAR_SECRET_KEY: 'sk_test_abc', VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_test_abc', WASL_MODE: 'mock' }
-    expect(failing(staging, 'staging')).toEqual([])
+    // staging is the closed BETA (migration 021): mock providers only, no Elm credentials.
+    const { WASL_APP_ID: _a, WASL_APP_KEY: _k, ...noWasl } = PROD
+    const staging = { ...noWasl, APP_ENV: 'staging', VITE_SUPABASE_URL: 'https://betabetabetabetabeta.supabase.co', MOYASAR_SECRET_KEY: 'sk_test_abc', VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_test_abc', WASL_MODE: 'mock' }
+    expect(failing(staging, 'staging')).toEqual(['beta_payments_mock'])
+    expect(failing({ ...staging, PAYMENT_PROVIDER: 'mock', VITE_PAYMENT_PROVIDER: 'mock' }, 'staging')).toEqual([])
   })
 
   it('demands strong, distinct worker secrets outside development', () => {

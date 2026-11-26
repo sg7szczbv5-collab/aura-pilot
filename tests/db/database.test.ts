@@ -56,7 +56,12 @@ async function rows<T = Record<string, unknown>>(who: string, sql: string, param
   return as(who, async (tx) => (await tx.query<T>(sql, params)).rows)
 }
 
+/** The BETA project ref used by the tests' environment marker (any 20 [a-z0-9] chars). */
+const TEST_BETA_REF = 'betatestprojectref01'
+
 async function newUser(phone: string, name: string): Promise<string> {
+  // BETA sign-ups are closed: testers are allowlisted first (migration 021).
+  await db.query(`select ops_guard.allow_tester($1, 'db test')`, [phone])
   const r = await db.query<{ id: string }>(
     `insert into auth.users (phone, raw_user_meta_data) values ($1, $2) returning id`,
     [phone, JSON.stringify({ full_name: name })],
@@ -98,6 +103,9 @@ beforeAll(async () => {
     await db.exec(readFileSync(join(MIGRATIONS, file), 'utf8'))
   }
   await db.exec(readFileSync(join(ROOT, 'supabase', 'seed.sql'), 'utf8'))
+  // Migration 021: the environment marker is written once per project, then the integrity check runs.
+  await db.query(`select ops_guard.set_environment('beta', $1)`, [TEST_BETA_REF])
+  await db.query(`select ops_guard.integrity_check()`)
 
   riderA = await newUser('966551112222', 'Sara Rider')
   riderB = await newUser('966553334444', 'Omar Rider')
@@ -411,28 +419,30 @@ describe('ride lifecycle (state machine, dispatch, PIN, settlement)', () => {
 
 // ────────────────────────────────────────────────────────────────────────────
 describe('financial constraints', () => {
+  // Since migration 021 (P1) nobody but postgres-owned functions writes payments directly, so
+  // these constraint checks run as the table owner (the role SECURITY DEFINER functions use).
   it('rejects non-positive payment amounts', async () => {
-    await expect(as('service', (tx) => tx.query(
+    await expect(db.transaction((tx) => tx.query(
       `insert into payments (kind, rider_id, provider, method_type, amount_halalas, idempotency_key)
        values ('wallet_topup', $1, 'mock', 'mada', -500, 'neg-amount-1')`, [riderB]))).rejects.toThrow(/check constraint/)
   })
 
   it('refunds can never exceed the original payment', async () => {
-    const p = await one<{ id: string }>('service',
+    const p = (await db.query<{ id: string }>(
       `insert into payments (kind, rider_id, provider, method_type, amount_halalas, status, idempotency_key)
-       values ('wallet_topup', $1, 'mock', 'mada', 5000, 'paid', 'topup-ok-1') returning id`, [riderB])
-    await one('service',
+       values ('wallet_topup', $1, 'mock', 'mada', 5000, 'paid', 'topup-ok-1') returning id`, [riderB])).rows[0]
+    await db.query(
       `insert into payments (kind, parent_payment_id, rider_id, provider, method_type, amount_halalas, status, idempotency_key)
        values ('refund', $1, $2, 'mock', 'mada', 3000, 'paid', 'refund-1') returning id`, [p.id, riderB])
-    await expect(one('service',
+    await expect(db.query(
       `insert into payments (kind, parent_payment_id, rider_id, provider, method_type, amount_halalas, idempotency_key)
        values ('refund', $1, $2, 'mock', 'mada', 2500, 'refund-2') returning id`, [p.id, riderB])).rejects.toThrow(/exceed/)
   })
 
   it('paid payments cannot go back to another status, and amounts are immutable', async () => {
-    await expect(as('service', (tx) => tx.query(`update payments set status = 'initiated' where idempotency_key = 'topup-ok-1'`)))
+    await expect(db.transaction((tx) => tx.query(`update payments set status = 'initiated' where idempotency_key = 'topup-ok-1'`)))
       .rejects.toThrow(/illegal payment status/)
-    await expect(as('service', (tx) => tx.query(`update payments set amount_halalas = 1 where idempotency_key = 'topup-ok-1'`)))
+    await expect(db.transaction((tx) => tx.query(`update payments set amount_halalas = 1 where idempotency_key = 'topup-ok-1'`)))
       .rejects.toThrow(/immutable/)
   })
 

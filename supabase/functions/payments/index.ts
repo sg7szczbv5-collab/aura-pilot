@@ -15,6 +15,7 @@ import { corsHeaders, json } from '../_shared/http.ts'
 import { handlePaymentAction } from '../_shared/payments/handlers.ts'
 import { createPaymentsDb } from '../_shared/payments/db.ts'
 import { getProvider } from '../_shared/payments/registry.ts'
+import { guardedFetch, refusal, runtimeGuard } from '../_shared/ops/runtimeGuard.ts'
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -29,11 +30,18 @@ Deno.serve(async (req: Request) => {
   const admin = createClient(env('SUPABASE_URL') ?? '', env('SUPABASE_SERVICE_ROLE_KEY') ?? '', {
     auth: { persistSession: false, autoRefreshToken: false },
   })
+  // BETA / production guard (D3, C1): refuse before any provider call when the environment is not safe.
+  const guard = await runtimeGuard(admin, env)
+  if (!guard.ok) {
+    const r = refusal(guard)
+    return json(r.status, r.body)
+  }
+  const liveFetch = guardedFetch(guard, (u: string, i: { method: string; headers: Record<string, string>; body?: string }) => fetch(u, i))
   const { data } = await userClient.auth.getUser()
 
   const result = await handlePaymentAction(await req.json().catch(() => null), {
     userId: data.user?.id ?? null,
-    provider: getProvider(providerName, env, (u, i) => fetch(u, i)),
+    provider: getProvider(providerName, env, liveFetch),
     db: createPaymentsDb(admin, providerName),
     callbackUrl: env('PAYMENT_CALLBACK_URL') ?? 'http://localhost:5180/#/passenger',
   })

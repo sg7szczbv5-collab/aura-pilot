@@ -8,6 +8,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { corsHeaders, json, safeEqual } from '../_shared/http.ts'
 import { getWaslProvider, runWaslWorker } from '../_shared/wasl/worker.ts'
 import { createWaslDb } from '../_shared/wasl/db.ts'
+import { guardedFetch, refusal, runtimeGuard } from '../_shared/ops/runtimeGuard.ts'
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -18,9 +19,16 @@ Deno.serve(async (req: Request) => {
   const admin = createClient(env('SUPABASE_URL') ?? '', env('SUPABASE_SERVICE_ROLE_KEY') ?? '', {
     auth: { persistSession: false, autoRefreshToken: false },
   })
+  // BETA / production guard (D3, C1): refuse before any provider call when the environment is not safe.
+  const guard = await runtimeGuard(admin, env)
+  if (!guard.ok) {
+    const r = refusal(guard)
+    return json(r.status, r.body)
+  }
+  const liveFetch = guardedFetch(guard, (u: string, i: { method: string; headers: Record<string, string>; body?: string }) => fetch(u, i))
   let provider
   try {
-    provider = getWaslProvider(env, (u, i) => fetch(u, i))
+    provider = getWaslProvider(env, liveFetch)
   } catch {
     return json(500, { error: 'wasl_not_configured' })
   }

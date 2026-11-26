@@ -18,6 +18,9 @@ export async function createDb(): Promise<PGlite> {
   const dir = join(ROOT, 'supabase', 'migrations')
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) await db.exec(readFileSync(join(dir, f), 'utf8'))
   await db.exec(readFileSync(join(ROOT, 'supabase', 'seed.sql'), 'utf8'))
+  // Migration 021: a BETA project carries its environment marker; the integrity check then passes.
+  await db.query(`select ops_guard.set_environment('beta', 'betae2eprojectref001')`)
+  await db.query(`select ops_guard.integrity_check()`)
   return db
 }
 
@@ -34,6 +37,7 @@ export function runAs<T>(db: PGlite, who: Who, fn: (tx: Transaction) => Promise<
 }
 
 export async function newUser(db: PGlite, phone: string, name: string): Promise<string> {
+  await db.query(`select ops_guard.allow_tester($1, 'e2e')`, [phone]) // BETA sign-ups are allowlist-only
   const r = await db.query<{ id: string }>(`insert into auth.users (phone, raw_user_meta_data) values ($1, $2) returning id`, [phone, JSON.stringify({ full_name: name })])
   return r.rows[0].id
 }

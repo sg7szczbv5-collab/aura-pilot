@@ -13,6 +13,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { corsHeaders, json } from '../_shared/http.ts'
 import { handleRequestRide } from '../_shared/requestRide.ts'
 import { buildRequestRideDeps } from '../_shared/requestRideDeps.ts'
+import { guardedFetch, refusal, runtimeGuard } from '../_shared/ops/runtimeGuard.ts'
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -28,12 +29,19 @@ Deno.serve(async (req: Request) => {
   const admin = createClient(env('SUPABASE_URL') ?? '', env('SUPABASE_SERVICE_ROLE_KEY') ?? '', {
     auth: { persistSession: false, autoRefreshToken: false },
   })
+  // BETA / production guard (D3, C1): refuse before any provider call when the environment is not safe.
+  const guard = await runtimeGuard(admin, env)
+  if (!guard.ok) {
+    const r = refusal(guard)
+    return json(r.status, r.body)
+  }
+  const liveFetch = guardedFetch(guard, (u: string, i: { method: string; headers: Record<string, string>; body?: string }) => fetch(u, i))
   const { data: userData } = await userClient.auth.getUser()
   const body = await req.json().catch(() => null)
 
   const result = await handleRequestRide(
     body,
-    buildRequestRideDeps({ userId: userData.user?.id ?? null, userClient, admin, env, fetch: (u, i) => fetch(u, i) }),
+    buildRequestRideDeps({ userId: userData.user?.id ?? null, userClient, admin, env, fetch: liveFetch }),
   )
   return json(result.status, result.body)
 })
