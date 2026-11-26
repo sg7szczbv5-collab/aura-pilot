@@ -37,6 +37,7 @@ export interface MapRoute {
   path?: LatLng[];
   width?: number;
   color?: string;
+  tone?: MapMarkerTone | string;
   dashed?: boolean;
 }
 
@@ -53,6 +54,11 @@ export interface MapZone {
 
 export type RouteInput = MapRoute | LatLng[];
 
+export type MapPadding =
+  | number
+  | [number, number, number, number]
+  | { top?: number; bottom?: number; left?: number; right?: number };
+
 export interface CityMapProps {
   center?: LatLng;
   zoom?: number;
@@ -66,13 +72,27 @@ export interface CityMapProps {
   labels?: boolean;
   fit?: LatLng[] | boolean;
   fitKey?: string | number;
-  padding?: number | number[] | { top?: number; bottom?: number; left?: number; right?: number };
+  padding?: MapPadding;
   interactive?: boolean;
   onPick?: ((pos: LatLng) => void) | Dispatch<SetStateAction<LatLng>>;
   onCenterChange?: ((center: LatLng, zoom?: number) => void) | Dispatch<SetStateAction<LatLng>>;
   children?: ReactNode;
   fallback?: ReactNode;
   className?: string;
+}
+
+interface LineFeature {
+  type: 'Feature';
+  properties: Record<string, unknown>;
+  geometry: {
+    type: 'LineString';
+    coordinates: [number, number][];
+  };
+}
+
+interface LineFeatureCollection {
+  type: 'FeatureCollection';
+  features: LineFeature[];
 }
 
 const DEFAULT_CENTER: LatLng = {
@@ -168,9 +188,9 @@ function createMarkerElement(marker: MapMarker, showLabels: boolean): HTMLDivEle
   return wrapper;
 }
 
-function normalizePadding(padding: CityMapProps['padding']): number | mapboxgl.PaddingOptions {
+function normalizePadding(padding: MapPadding | undefined): number | mapboxgl.PaddingOptions {
   if (typeof padding === 'number') return padding;
-  if (Array.isArray(padding) && padding.length > 0) {
+  if (Array.isArray(padding)) {
     const [top = 48, right = 48, bottom = 48, left = 48] = padding;
     return { top, right, bottom, left };
   }
@@ -323,14 +343,14 @@ export function CityMap({
       ...routes.map(extractRoutePoints).filter((path) => path.length >= 2),
     ];
 
-    const features: GeoJSON.Feature[] = allPaths.map((path) => ({
+    const features: LineFeature[] = allPaths.map((path) => ({
       type: 'Feature',
       properties: {},
       geometry: {
         type: 'LineString',
         coordinates: path
           .filter((p) => typeof p.lat === 'number' && typeof p.lng === 'number')
-          .map((p) => [p.lng, p.lat]),
+          .map((p) => [p.lng, p.lat] as [number, number]),
       },
     }));
 
@@ -341,17 +361,17 @@ export function CityMap({
         | mapboxgl.GeoJSONSource
         | undefined;
 
-      const geojsonData: GeoJSON.FeatureCollection = {
+      const geojsonData: LineFeatureCollection = {
         type: 'FeatureCollection',
         features,
       };
 
       if (existingSource) {
-        existingSource.setData(geojsonData);
+        existingSource.setData(geojsonData as unknown as GeoJSON.FeatureCollection);
       } else {
         mapRef.current.addSource(sourceId, {
           type: 'geojson',
-          data: geojsonData,
+          data: geojsonData as unknown as GeoJSON.FeatureCollection,
         });
 
         mapRef.current.addLayer({
