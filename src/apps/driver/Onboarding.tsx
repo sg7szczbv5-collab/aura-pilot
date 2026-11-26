@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Camera, Check, Clock, FileCheck2, FileUp, ShieldCheck, X, XCircle } from 'lucide-react'
+import { Camera, Car, Check, Clock, FileCheck2, FileUp, ShieldCheck, X, XCircle } from 'lucide-react'
 import { Wordmark } from '../../ds/Logo'
 import { Button, cx, Field, ICON, Input, OtpInput, PhoneInput, Select, SuccessMark, validSaudiMobile } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
@@ -15,6 +15,7 @@ import { CITIES } from '../../core/geo'
 import { VEHICLE_CLASSES } from '../../core/pricing'
 import type { CityId, DriverDoc, VehicleClassId } from '../../core/types'
 import { TopBar, screenMotion } from '../shared/mobile'
+import { showVehicleRejectedScreen, vehicleRejection } from './vehicleRejection'
 
 export function DriverSplash({ onDone }: { onDone: () => void }) {
   const { t } = useI18n()
@@ -488,6 +489,46 @@ export function ApplicationStatus({ driverId, onApproved, onLogout }: { driverId
         </Button>
       </div>
     )
+  if (showVehicleRejectedScreen(d)) {
+    const vr = vehicleRejection(d)!
+    const lines: string[] = []
+    if (vr.vehicleReason) lines.push(vr.vehicleReason)
+    for (const doc of vr.docs) {
+      const text = doc.expired ? t('منتهية الصلاحية، ارفع نسخة محدّثة', 'Expired, upload a renewed copy') : doc.reason
+      if (text) lines.push(`${docLabel[doc.id]}: ${text}`)
+    }
+    // The application-level note, when it says something the vehicle reasons do not.
+    if (d.status === 'rejected' && d.rejectionReason && !lines.some((l) => l.includes(d.rejectionReason!.trim()))) lines.push(d.rejectionReason)
+    return (
+      <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink px-8 text-center text-white">
+        <XCircle size={68} className="text-danger" strokeWidth={1.5} />
+        <h1 className="mt-5 font-display text-2xl font-semibold">{t('لم يتم قبول الطلب', 'Application not approved')}</h1>
+        <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-3 py-1 text-xs font-semibold text-danger">
+          <Car size={14} /> {t('المركبة', 'Vehicle')}
+        </span>
+        <div className="mt-5 w-full rounded-2xl bg-ink-2 p-4 text-start">
+          <p className="text-xs font-semibold text-white/45">{t('سبب الرفض', 'Reason')}</p>
+          {lines.length ? (
+            <ul className="mt-1.5 space-y-1.5 text-sm text-white/85">
+              {lines.map((l, i) => (
+                <li key={i}>{l}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1.5 text-sm text-white/70">
+              {t(
+                'لم تستوفِ المركبة متطلبات التسجيل في أورا. راجع بيانات المركبة واستمارتها وتأمينها، أو تواصل مع الدعم لمعرفة التفاصيل.',
+                'Your vehicle did not meet AURA registration requirements. Please check the vehicle details, registration and insurance, or contact support for details.',
+              )}
+            </p>
+          )}
+        </div>
+        <Button variant="secondary" size="lg" full className="mt-8" onClick={onLogout}>
+          {t('تسجيل الخروج', 'Log out')}
+        </Button>
+      </div>
+    )
+  }
   if (d.status === 'rejected')
     return (
       <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink px-8 text-center text-white">

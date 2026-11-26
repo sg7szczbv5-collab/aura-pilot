@@ -22,7 +22,7 @@ type Row = {
 }
 type Doc = { id: string; doc_type: string; status: string; storage_path: string; expires_at: string | null; rejection_reason: string | null; reviewed_at: string | null; vehicle_id: string | null }
 const DOC_COLS = 'id, doc_type, status, storage_path, expires_at, rejection_reason, reviewed_at, vehicle_id'
-type Vehicle = { id: string; make: string; model: string; year: number; color: string; plate_letters: string; plate_number: string; sequence_number: string; vehicle_class: string; status: string; wasl_status: string }
+type Vehicle = { id: string; make: string; model: string; year: number; color: string; plate_letters: string; plate_number: string; sequence_number: string; vehicle_class: string; status: string; status_reason: string | null; wasl_status: string }
 type WaslLog = { id: string; operation: string; status: string; attempt: number; error_message: string | null; created_at: string; next_retry_at: string | null }
 
 const mask = (s: string | null, keep = 4) => (s ? `${'•'.repeat(Math.max(0, s.length - keep))}${s.slice(-keep)}` : '—')
@@ -40,6 +40,8 @@ export function ApplicationsPage() {
   const [vehicle, setVehicle] = useState<Vehicle | null>(null)
   const [wasl, setWasl] = useState<WaslLog[]>([])
   const [reason, setReason] = useState('')
+  /** Vehicle rejection reason (own dropdown in the vehicle section → vehicles.status_reason). */
+  const [vehicleReason, setVehicleReason] = useState('')
   const [busy, setBusy] = useState(false)
   /** Document currently being rejected (disables its button) and the last per-document error. */
   const [rejectingDoc, setRejectingDoc] = useState<string | null>(null)
@@ -64,6 +66,7 @@ export function ApplicationsPage() {
   const open = async (r: Row) => {
     setSel(r)
     setReason('')
+    setVehicleReason('')
     setDocError(null)
     const [d, v, w] = await Promise.all([
       sb.from('driver_documents').select(DOC_COLS).eq('driver_id', r.id).order('created_at'),
@@ -257,14 +260,26 @@ export function ApplicationsPage() {
                 <KV k={t('اللوحة', 'Plate')} v={<span className="num">{vehicle.plate_letters} {vehicle.plate_number}</span>} />
                 <KV k={t('الرقم التسلسلي', 'Sequence no.')} v={<span className="num">{vehicle.sequence_number}</span>} />
                 <KV k={t('الحالة / وصل', 'Status / Wasl')} v={`${vehicle.status} · ${vehicle.wasl_status}`} />
+                {vehicle.status === 'rejected' && <KV k={t('سبب رفض المركبة', 'Vehicle rejection reason')} v={vehicle.status_reason ?? '—'} />}
                 {vehicle.status === 'pending_review' && can('vehicles.edit') && (
-                  <div className="mt-2 flex gap-2">
-                    <Button size="sm" onClick={() => void run('admin_review_vehicle', { p_vehicle_id: vehicle.id, p_approve: true }, t('تم اعتماد المركبة', 'Vehicle approved'))}>
-                      {t('اعتماد المركبة', 'Approve vehicle')}
-                    </Button>
-                    <Button size="sm" variant="secondary" loading={busy} disabled={busy || noReason} title={noReason ? t('اختر سبب الرفض أولاً', 'Select a reason first') : undefined} onClick={() => void run('admin_review_vehicle', { p_vehicle_id: vehicle.id, p_approve: false, p_reason: reason }, t('تم رفض المركبة', 'Vehicle rejected'))}>
-                      {t('رفض', 'Reject')}
-                    </Button>
+                  <div className="mt-2 space-y-2">
+                    {/* Saved by admin_review_vehicle into vehicles.status_reason (shown to the captain). */}
+                    <RejectionReasonDropdown key={vehicle.id} label={t('سبب رفض المركبة', 'Vehicle rejection reason')} onChange={setVehicleReason} disabled={busy} />
+                    <div className="flex gap-2">
+                      <Button size="sm" disabled={busy} onClick={() => void run('admin_review_vehicle', { p_vehicle_id: vehicle.id, p_approve: true }, t('تم اعتماد المركبة', 'Vehicle approved'))}>
+                        {t('اعتماد المركبة', 'Approve vehicle')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        loading={busy}
+                        disabled={busy || !vehicleReason.trim()}
+                        title={!vehicleReason.trim() ? t('اختر سبب رفض المركبة أولاً', 'Select a vehicle rejection reason first') : undefined}
+                        onClick={() => void run('admin_review_vehicle', { p_vehicle_id: vehicle.id, p_approve: false, p_reason: vehicleReason.trim() }, t('تم رفض المركبة', 'Vehicle rejected'))}
+                      >
+                        {t('رفض المركبة', 'Reject vehicle')}
+                      </Button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -282,7 +297,7 @@ export function ApplicationsPage() {
               {wasl.length === 0 && <p className="text-[12px] text-mute">{t('لم يُرسل إلى وصل بعد', 'Not sent to Wasl yet')}</p>}
             </div>
 
-            <RejectionReasonDropdown key={sel.id} onChange={setReason} disabled={busy || rejectingDoc !== null} />
+            <RejectionReasonDropdown key={sel.id} label={t('سبب رفض الوثيقة / الطلب / الإيقاف', 'Reason (document / application / suspension)')} onChange={setReason} disabled={busy || rejectingDoc !== null} />
           </div>
         )}
       </Drawer>

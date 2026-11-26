@@ -154,7 +154,7 @@ export async function syncDriverSelf(uid: string): Promise<Driver | null> {
   const [{ data: p }, { data: ve }, { data: docRows }] = await Promise.all([
     sb.from('profiles').select('full_name, phone, email').eq('id', uid).maybeSingle(),
     d.current_vehicle_id
-      ? sb.from('vehicles').select('id, vehicle_class, make, model, year, color, plate_letters, plate_number').eq('id', d.current_vehicle_id).maybeSingle()
+      ? sb.from('vehicles').select('id, vehicle_class, make, model, year, color, plate_letters, plate_number, status, status_reason').eq('id', d.current_vehicle_id).maybeSingle()
       : Promise.resolve({ data: null }),
     sb.from('driver_documents').select('doc_type, status, expires_at, rejection_reason, created_at').eq('driver_id', uid).order('created_at'),
   ])
@@ -170,6 +170,7 @@ export async function syncDriverSelf(uid: string): Promise<Driver | null> {
     cityId: city ?? 'riyadh',
     status: d.status === 'approved' || d.status === 'pending_review' || d.status === 'rejected' || d.status === 'suspended' ? d.status : 'incomplete',
     rejectionReason: d.status_reason ?? undefined,
+    vehicleReview: ve ? { status: ve.status, reason: ve.status_reason?.trim() || undefined } : undefined,
     online: d.is_online,
     rating: Number(d.rating ?? 5),
     ratingsCount: d.ratings_count ?? 0,

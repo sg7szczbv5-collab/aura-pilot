@@ -1257,3 +1257,19 @@ describe('admin console: direct document rejection (migration 016)', () => {
     expect(a.length).toBeGreaterThan(0)
   })
 })
+
+describe('vehicle rejection reason (vehicles.status_reason)', () => {
+  it('admin_review_vehicle stores the reason and the captain can read it on their own vehicle', async () => {
+    const cap = await newUser('966544100002', 'Vehicle Reject Captain')
+    await db.query(
+      `insert into drivers (id, status, city_id, national_id, date_of_birth, iban)
+       values ($1, 'pending_review', (select id from cities where code = 'riyadh'), '1088888882', '1992-01-01', 'SA0380000000608010167519')`, [cap])
+    const vid = (await db.query<{ id: string }>(
+      `insert into vehicles (driver_id, vehicle_class, make, model, year, color, plate_letters, plate_number, sequence_number, seats)
+       values ($1, 'go', 'Kia', 'K5', 2024, 'Grey', 'RJT', '4321', '555666777', 4) returning id`, [cap])).rows[0].id
+    await expect(one(driverManager, `select admin_review_vehicle($1, false, '  ')`, [vid])).rejects.toThrow(/reason is required/)
+    await one(driverManager, `select admin_review_vehicle($1, false, 'عدم استيفاء شروط الفئة المطلوبة')`, [vid])
+    expect(await one(cap, `select status, status_reason from vehicles where id = $1`, [vid]))
+      .toEqual({ status: 'rejected', status_reason: 'عدم استيفاء شروط الفئة المطلوبة' })
+  })
+})
