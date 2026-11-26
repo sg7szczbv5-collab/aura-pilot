@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
@@ -36,6 +36,16 @@ export interface CityMapProps {
   zoom?: number;
   markers?: MapMarker[];
   route?: LatLng[];
+  routes?: LatLng[][];
+  zones?: unknown[];
+  theme?: 'light' | 'dark' | string;
+  fit?: LatLng[] | boolean;
+  fitKey?: string | number;
+  padding?: number | { top?: number; bottom?: number; left?: number; right?: number };
+  interactive?: boolean;
+  onPick?: (pos: LatLng) => void;
+  onCenterChange?: (center: LatLng, zoom?: number) => void;
+  children?: ReactNode;
   className?: string;
 }
 
@@ -135,11 +145,24 @@ export function CityMap({
   zoom = 11.5,
   markers = [],
   route = [],
+  routes = [],
+  fit,
+  fitKey,
+  padding,
+  interactive = true,
+  onPick,
+  onCenterChange,
+  children,
   className = '',
 }: CityMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
+  const onPickRef = useRef(onPick);
+  const onCenterChangeRef = useRef(onCenterChange);
+
+  onPickRef.current = onPick;
+  onCenterChangeRef.current = onCenterChange;
 
   const token = getMapboxToken();
 
@@ -153,9 +176,20 @@ export function CityMap({
       style: 'mapbox://styles/mapbox/streets-v12',
       center: [center.lng, center.lat],
       zoom,
+      interactive,
     });
 
     map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+
+    map.on('click', (e) => {
+      onPickRef.current?.({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+    });
+
+    map.on('moveend', () => {
+      const c = map.getCenter();
+      onCenterChangeRef.current?.({ lat: c.lat, lng: c.lng }, map.getZoom());
+    });
+
     mapRef.current = map;
 
     return () => {
@@ -164,18 +198,35 @@ export function CityMap({
       map.remove();
       mapRef.current = null;
     };
-  }, [token]);
+  }, [token, interactive]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+
+    if (Array.isArray(fit) && fit.length > 0) {
+      const bounds = new mapboxgl.LngLatBounds();
+      fit.forEach((pt) => {
+        if (typeof pt?.lat === 'number' && typeof pt?.lng === 'number') {
+          bounds.extend([pt.lng, pt.lat]);
+        }
+      });
+      if (!bounds.isEmpty()) {
+        map.fitBounds(bounds, {
+          padding: typeof padding === 'number' ? padding : 48,
+          maxZoom: 15,
+          duration: 500,
+        });
+        return;
+      }
+    }
 
     map.easeTo({
       center: [center.lng, center.lat],
       zoom,
       duration: 500,
     });
-  }, [center.lat, center.lng, zoom]);
+  }, [center.lat, center.lng, zoom, fit, fitKey, padding]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -210,9 +261,21 @@ export function CityMap({
     const sourceId = 'aura-active-route-source';
     const layerId = 'aura-active-route-layer';
 
-    const coordinates = route
-      .filter((p) => typeof p.lat === 'number' && typeof p.lng === 'number')
-      .map((p) => [p.lng, p.lat]);
+    const allPaths: LatLng[][] = [
+      ...(route.length >= 2 ? [route] : []),
+      ...routes.filter((path) => Array.isArray(path) && path.length >= 2),
+    ];
+
+    const features: GeoJSON.Feature[] = allPaths.map((path) => ({
+      type: 'Feature',
+      properties: {},
+      geometry: {
+        type: 'LineString',
+        coordinates: path
+          .filter((p) => typeof p.lat === 'number' && typeof p.lng === 'number')
+          .map((p) => [p.lng, p.lat]),
+      },
+    }));
 
     const applyRoute = () => {
       if (!mapRef.current) return;
@@ -223,19 +286,7 @@ export function CityMap({
 
       const geojsonData: GeoJSON.FeatureCollection = {
         type: 'FeatureCollection',
-        features:
-          coordinates.length >= 2
-            ? [
-                {
-                  type: 'Feature',
-                  properties: {},
-                  geometry: {
-                    type: 'LineString',
-                    coordinates,
-                  },
-                },
-              ]
-            : [],
+        features,
       };
 
       if (existingSource) {
@@ -267,14 +318,15 @@ export function CityMap({
     } else {
       map.once('load', applyRoute);
     }
-  }, [route]);
+  }, [route, routes]);
 
   if (!token) {
     return (
       <div
-        className={`flex h-full min-h-[360px] w-full items-center justify-center rounded-xl border border-amber-500/40 bg-slate-900 p-6 text-center text-sm text-amber-200 ${className}`}
+        className={`relative flex h-full min-h-[360px] w-full items-center justify-center rounded-xl border border-amber-500/40 bg-slate-900 p-6 text-center text-sm text-amber-200 ${className}`}
       >
         تعذر العثور على رمز Mapbox العام (`NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN`). تأكد من ضبطه في Vercel وإعادة النشر.
+        {children}
       </div>
     );
   }
@@ -282,8 +334,10 @@ export function CityMap({
   return (
     <div
       ref={containerRef}
-      className={`h-full min-h-[420px] w-full overflow-hidden rounded-xl ${className}`}
-    />
+      className={`relative h-full min-h-[420px] w-full overflow-hidden rounded-xl ${className}`}
+    >
+      {children}
+    </div>
   );
 }
 
