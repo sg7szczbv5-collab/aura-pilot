@@ -26,7 +26,12 @@ export type Quotes = {
   exact: boolean
   loading: boolean
   error?: string
+  /** Ask the server again (after an error). */
+  retry: () => void
 }
+
+/** Server promo errors (compute_quote → eligible_promo) — the fix is to remove the code. */
+export const isPromoError = (e?: string) => !!e && /promo/i.test(e)
 
 const localQuotes = (pickup: Place, dropoff: Place, promo?: string) =>
   Object.fromEntries(VEHICLE_CLASSES.map((c) => [c.id, quoteTrip(pickup, dropoff, c.id, promo)])) as Record<VehicleClassId, FareBreakdown>
@@ -34,7 +39,11 @@ const localQuotes = (pickup: Place, dropoff: Place, promo?: string) =>
 export function useQuotes(pickup: Place, dropoff: Place, promo: string | undefined, classId: VehicleClassId, lang: 'ar' | 'en'): Quotes {
   const local = useMemo(() => localQuotes(pickup, dropoff, promo), [pickup, dropoff, promo])
   const [server, setServer] = useState<{ key: string; byClass?: Record<VehicleClassId, FareBreakdown>; error?: string } | null>(null)
-  const key = `${pickup.pos.lat},${pickup.pos.lng}|${dropoff.pos.lat},${dropoff.pos.lng}|${promo ?? ''}`
+  const [attempt, setAttempt] = useState(0)
+  // The selected class is part of the key: the server fails the whole quote only when
+  // *that* class cannot be priced, so another class must be asked for again.
+  const key = `${pickup.pos.lat},${pickup.pos.lng}|${dropoff.pos.lat},${dropoff.pos.lng}|${promo ?? ''}|${classId}|${attempt}`
+  const retry = () => setAttempt((n) => n + 1)
 
   useEffect(() => {
     if (!SERVER) return
@@ -57,9 +66,9 @@ export function useQuotes(pickup: Place, dropoff: Place, promo: string | undefin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
 
-  if (!SERVER) return { byClass: local, exact: true, loading: false }
+  if (!SERVER) return { byClass: local, exact: true, loading: false, retry }
   const fresh = server?.key === key ? server : null
-  return { byClass: fresh?.byClass ?? local, exact: !!fresh?.byClass, loading: !fresh, error: fresh?.error }
+  return { byClass: fresh?.byClass ?? local, exact: !!fresh?.byClass, loading: !fresh, error: fresh?.error, retry }
 }
 
 /* ---------- Nearby cars ---------- */

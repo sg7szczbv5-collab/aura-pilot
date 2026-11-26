@@ -5,3 +5,8 @@ indx-1/
 .env
 .env.production
 .env.production.bak
+
+# Local command output (never commit)
+search-results.txt
+preflight-report.txt
+preflight.json

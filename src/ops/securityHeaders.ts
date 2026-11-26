@@ -75,3 +75,23 @@ export function checkHeaders(text: string): Check[] {
   add('cache_assets', /immutable/.test(rules['/assets/*']?.['cache-control'] ?? ''), 'Hashed assets cached immutably', 'warning')
   return out
 }
+
+/**
+ * vercel.json must carry the same headers as public/_headers (Vercel ignores _headers).
+ * Returns the paths / header names that differ; empty when in sync.
+ */
+export function diffVercelHeaders(headersText: string, vercelJson: { headers?: { source: string; headers: { key: string; value: string }[] }[] }): string[] {
+  const want = parseHeadersFile(headersText)
+  const toSource = (path: string) => (path === '/*' ? '/(.*)' : path.replace(/\*/g, '(.*)'))
+  const have = new Map((vercelJson.headers ?? []).map((h) => [h.source, Object.fromEntries(h.headers.map((x) => [x.key.toLowerCase(), x.value]))]))
+  const diffs: string[] = []
+  for (const [path, headers] of Object.entries(want)) {
+    const got = have.get(toSource(path))
+    if (!got) {
+      diffs.push(`${path}: missing in vercel.json`)
+      continue
+    }
+    for (const [k, v] of Object.entries(headers)) if (got[k] !== v) diffs.push(`${path}: ${k}`)
+  }
+  return diffs
+}

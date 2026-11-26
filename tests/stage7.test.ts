@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { checkConfig, jwtRole, looksSecret, scanBundle, summarize, type Env } from '../src/ops/configChecks'
-import { allows, checkHeaders, parseCsp, parseHeadersFile } from '../src/ops/securityHeaders'
+import { allows, checkHeaders, diffVercelHeaders, parseCsp, parseHeadersFile } from '../src/ops/securityHeaders'
 import { parseEnvFile } from '../src/ops/envFile'
 import { healthResponse, type Readiness } from '../supabase/functions/_shared/ops/health'
 
@@ -145,5 +145,22 @@ describe('health endpoint response', () => {
 describe('.env parsing', () => {
   it('handles comments, quotes and export without evaluating anything', () => {
     expect(parseEnvFile('# c\nexport A=1\nB="two words"\nC=x # note\nD=\'$(rm -rf /)\'\nbad line\n')).toEqual({ A: '1', B: 'two words', C: 'x', D: '$(rm -rf /)' })
+  })
+})
+
+describe('vercel.json security headers', () => {
+  const headers = readFileSync(join(ROOT, 'public', '_headers'), 'utf8')
+  const vercel = JSON.parse(readFileSync(join(ROOT, 'vercel.json'), 'utf8'))
+  it('carries exactly the headers of public/_headers (Vercel ignores _headers)', () => {
+    expect(diffVercelHeaders(headers, vercel)).toEqual([])
+  })
+  it('detects drift', () => {
+    const changed = structuredClone(vercel)
+    changed.headers[0].headers[0].value = "default-src *"
+    expect(diffVercelHeaders(headers, changed)).toEqual(['/*: content-security-policy'])
+  })
+  it('CSP allows the map providers the app can use (Google, Mapbox)', () => {
+    const csp = parseCsp(parseHeadersFile(headers)['/*']['content-security-policy'])
+    for (const u of ['https://api.mapbox.com', 'https://events.mapbox.com', 'https://a.tiles.mapbox.com', 'https://maps.googleapis.com']) expect(allows(csp['connect-src'], u)).toBe(true)
   })
 })

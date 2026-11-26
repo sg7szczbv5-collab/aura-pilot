@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { checkConfig, scanBundle, summarize, type Check, type Env, type Target } from '../src/ops/configChecks'
-import { checkHeaders } from '../src/ops/securityHeaders'
+import { checkHeaders, diffVercelHeaders } from '../src/ops/securityHeaders'
 import { parseEnvFile } from '../src/ops/envFile'
 
 const root = resolve(import.meta.dirname ?? '.', '..')
@@ -42,6 +42,13 @@ async function main() {
   const headersPath = join(root, 'public', '_headers')
   if (existsSync(headersPath)) checks.push(...checkHeaders(readFileSync(headersPath, 'utf8')))
   else checks.push({ id: 'headers_file', area: 'hosting', severity: 'blocker', ok: false, detail: 'public/_headers is missing' })
+
+  // Vercel ignores public/_headers: the same headers must be in vercel.json.
+  const vercelPath = join(root, 'vercel.json')
+  if (existsSync(headersPath) && existsSync(vercelPath)) {
+    const diffs = diffVercelHeaders(readFileSync(headersPath, 'utf8'), JSON.parse(readFileSync(vercelPath, 'utf8')))
+    checks.push({ id: 'vercel_headers', area: 'hosting', severity: 'blocker', ok: diffs.length === 0, detail: diffs.length ? `vercel.json differs from public/_headers: ${diffs.join('; ')}` : 'vercel.json carries the same security headers (Vercel ignores _headers)' })
+  }
 
   const dist = join(root, 'dist')
   if (existsSync(dist)) {
