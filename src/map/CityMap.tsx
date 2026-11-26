@@ -100,6 +100,12 @@ const DEFAULT_CENTER: LatLng = {
   lng: 46.6753,
 };
 
+function normalizeMapboxZoom(rawZoom: number | undefined): number {
+  if (typeof rawZoom !== 'number' || Number.isNaN(rawZoom)) return 11.5;
+  if (rawZoom > 22) return 11.5;
+  return Math.min(Math.max(rawZoom, 2), 20);
+}
+
 function getMapboxToken(): string {
   const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
   const globalProcess = (
@@ -240,6 +246,7 @@ export function CityMap({
   onCenterChangeRef.current = onCenterChange;
 
   const token = getMapboxToken();
+  const safeZoom = normalizeMapboxZoom(zoom);
 
   useEffect(() => {
     if (!containerRef.current || !token || mapRef.current) return;
@@ -250,12 +257,20 @@ export function CityMap({
       container: containerRef.current,
       style: 'mapbox://styles/mapbox/streets-v12',
       center: [center.lng, center.lat],
-      zoom,
+      zoom: safeZoom,
       interactive,
     });
 
     if (controls) {
       map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      map.addControl(
+        new mapboxgl.GeolocateControl({
+          positionOptions: { enableHighAccuracy: true },
+          trackUserLocation: true,
+          showUserHeading: true,
+        }),
+        'top-right'
+      );
     }
 
     map.on('click', (e) => {
@@ -291,7 +306,7 @@ export function CityMap({
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds, {
           padding: normalizePadding(padding),
-          maxZoom: 15,
+          maxZoom: 14,
           duration: 500,
         });
         return;
@@ -300,10 +315,10 @@ export function CityMap({
 
     map.easeTo({
       center: [center.lng, center.lat],
-      zoom,
+      zoom: safeZoom,
       duration: 500,
     });
-  }, [center.lat, center.lng, zoom, fit, fitKey, padding]);
+  }, [center.lat, center.lng, safeZoom, fit, fitKey, padding]);
 
   useEffect(() => {
     const map = mapRef.current;
