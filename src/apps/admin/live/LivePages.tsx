@@ -12,6 +12,7 @@ import { CityMap, type MapMarker } from '../../../map/CityMap'
 import { DataTable, Drawer, FilterChips, KV, Kpi, PageHeader, Panel, useAdmin, type Col } from '../kit'
 import { RejectionReasonDropdown } from '../components/RejectionReasonDropdown'
 import * as api from './adminApi'
+import { TARIFF_BOUNDS, TARIFF_KEYS, tariffChanges, toInput, validateTariff, type FieldError, type TariffKey } from './tariffValidation'
 
 /** Load on mount and on demand; keeps the last error for an ErrorState. */
 function useLoad<T>(fn: () => Promise<api.Result<T>>, deps: unknown[]) {
@@ -572,49 +573,86 @@ export function LiveFinancePage() {
 
 /* ---------------------------------------------------------------- Pricing */
 
-const TARIFF_FIELDS: { key: keyof api.TariffPatch; ar: string; en: string; unit: 'sar' | 'bps' }[] = [
-  { key: 'base_fare_halalas', ar: 'فتح العداد', en: 'Base fare', unit: 'sar' },
-  { key: 'per_km_halalas', ar: 'لكل كم', en: 'Per km', unit: 'sar' },
-  { key: 'per_min_halalas', ar: 'لكل دقيقة', en: 'Per minute', unit: 'sar' },
-  { key: 'min_fare_halalas', ar: 'الحد الأدنى', en: 'Minimum fare', unit: 'sar' },
-  { key: 'cancellation_fee_halalas', ar: 'رسوم الإلغاء', en: 'Cancellation fee', unit: 'sar' },
-  { key: 'commission_bps', ar: 'عمولة أورا %', en: 'AURA commission %', unit: 'bps' },
+const TARIFF_FIELDS: { key: TariffKey; ar: string; en: string }[] = [
+  { key: 'base_fare_halalas', ar: 'فتح العداد', en: 'Base fare' },
+  { key: 'per_km_halalas', ar: 'لكل كم', en: 'Per km' },
+  { key: 'per_min_halalas', ar: 'لكل دقيقة', en: 'Per minute' },
+  { key: 'min_fare_halalas', ar: 'الحد الأدنى', en: 'Minimum fare' },
+  { key: 'cancellation_fee_halalas', ar: 'رسوم الإلغاء', en: 'Cancellation fee' },
+  { key: 'commission_bps', ar: 'عمولة أورا', en: 'AURA commission' },
 ]
 
+/**
+ * Tariffs: edit → review (old → new for every changed field) → explicit confirmation.
+ * Validation (tariffValidation.ts) rejects empty, malformed and out-of-range values and
+ * never turns an empty field into 0; the database enforces the same bounds (migration 020).
+ */
 export function LivePricingPage() {
   const { t, lang } = useI18n()
   const toast = useToast()
   const { can } = useAdmin()
   const r = useLoad(() => api.loadTariffs(), [])
   const [edit, setEdit] = useState<api.TariffRow | null>(null)
-  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [draft, setDraft] = useState<Partial<Record<TariffKey, string>>>({})
+  const [errors, setErrors] = useState<Partial<Record<TariffKey, FieldError>>>({})
+  const [review, setReview] = useState<{ values: Record<TariffKey, number>; changes: ReturnType<typeof tariffChanges> } | null>(null)
   const [busy, setBusy] = useState(false)
-  const shown = (row: api.TariffRow, f: (typeof TARIFF_FIELDS)[number]) => (f.unit === 'sar' ? api.sar(row[f.key]) : (row[f.key] / 100).toFixed(2))
+  const label = (k: TariffKey) => {
+    const f = TARIFF_FIELDS.find((x) => x.key === k)!
+    return `${lang === 'en' ? f.en : f.ar} (${TARIFF_BOUNDS[k].unit === 'pct' ? '%' : 'SAR'})`
+  }
+  const range = (k: TariffKey) => `${toInput(TARIFF_BOUNDS[k].min)} – ${toInput(TARIFF_BOUNDS[k].max)}`
+  const errorText = (k: TariffKey, e?: FieldError) =>
+    !e
+      ? undefined
+      : e === 'required'
+        ? t('هذا الحقل مطلوب', 'This field is required')
+        : e === 'format'
+          ? t('أدخل رقماً موجباً بخانتين عشريتين كحد أقصى', 'Enter a positive number with at most two decimals')
+          : t(`خارج النطاق المسموح: ${range(k)}`, `Outside the allowed range: ${range(k)}`)
+  const current = (row: api.TariffRow) => Object.fromEntries(TARIFF_KEYS.map((k) => [k, row[k]])) as Record<TariffKey, number>
+
   const open = (row: api.TariffRow) => {
     setEdit(row)
-    setDraft(Object.fromEntries(TARIFF_FIELDS.map((f) => [f.key, shown(row, f)])))
+    setDraft(Object.fromEntries(TARIFF_KEYS.map((k) => [k, toInput(row[k])])))
+    setErrors({})
+    setReview(null)
   }
-  const save = async () => {
+  const close = () => {
+    setEdit(null)
+    setReview(null)
+  }
+  const toReview = () => {
     if (!edit) return
-    const patch = Object.fromEntries(TARIFF_FIELDS.map((f) => [f.key, Math.round(Number(draft[f.key]) * 100)])) as api.TariffPatch
-    if (Object.values(patch).some((v) => !Number.isFinite(v) || v < 0)) return toast(t('قيم غير صالحة', 'Invalid values'), 'error')
+    const v = validateTariff(draft)
+    if (!v.ok) {
+      setErrors(v.errors)
+      return
+    }
+    setErrors({})
+    const changes = tariffChanges(current(edit), v.values)
+    if (!changes.length) return toast(t('لا توجد تغييرات', 'Nothing has changed'), 'info')
+    setReview({ values: v.values, changes })
+  }
+  const apply = async () => {
+    if (!edit || !review) return
     setBusy(true)
-    const res = await api.updateTariff(edit.id, patch)
+    const res = await api.updateTariff(edit.id, review.values)
     setBusy(false)
     if (res.error !== undefined) return toast(res.error, 'error')
-    toast(t('تم حفظ التسعيرة', 'Tariff saved'), 'success')
-    setEdit(null)
+    toast(t('تم تطبيق التسعيرة الجديدة', 'New tariff applied'), 'success')
+    close()
     void r.reload()
   }
   const cols: Col<api.TariffRow>[] = [
     { key: 'city', header: t('المدينة', 'City'), cell: (x) => (lang === 'en' ? x.city?.name_en : x.city?.name_ar) ?? '—', csv: (x) => x.city?.code ?? '' },
     { key: 'class', header: t('الفئة', 'Class'), cell: (x) => x.vehicle_class, csv: (x) => x.vehicle_class },
-    ...TARIFF_FIELDS.map((f): Col<api.TariffRow> => ({ key: f.key, header: lang === 'en' ? f.en : f.ar, cell: (x) => <span className="num">{shown(x, f)}</span>, csv: (x) => shown(x, f) })),
+    ...TARIFF_KEYS.map((k): Col<api.TariffRow> => ({ key: k, header: label(k), cell: (x) => <span className="num">{toInput(x[k])}</span>, csv: (x) => toInput(x[k]) })),
     { key: 'active', header: t('مفعّلة', 'Active'), cell: (x) => (x.is_active ? <Badge tone="done">✓</Badge> : '—') },
   ]
   return (
     <div>
-      <PageHeader title={t('التسعير والعمولات', 'Pricing & commission')} sub={t('التعرفة الفعلية التي يحسب بها الخادم الأجرة والعمولة. التعديل يُسجَّل في سجل التدقيق.', 'The tariffs the server prices trips and commission with. Edits are audited.')} actions={<RefreshButton onClick={() => void r.reload()} loading={r.loading} />} />
+      <PageHeader title={t('التسعير والعمولات', 'Pricing & commission')} sub={t('التعرفة الفعلية التي يحسب بها الخادم الأجرة والعمولة. كل تعديل يُراجَع ويُؤكَّد ثم يُسجَّل في سجل التدقيق.', 'The tariffs the server prices trips and commission with. Every edit is reviewed, confirmed and audited.')} actions={<RefreshButton onClick={() => void r.reload()} loading={r.loading} />} />
       {r.error && !r.data ? (
         <LoadError error={r.error} onRetry={() => void r.reload()} />
       ) : (
@@ -624,21 +662,54 @@ export function LivePricingPage() {
       )}
       <Drawer
         open={!!edit}
-        onClose={() => setEdit(null)}
+        onClose={close}
         title={edit ? `${edit.vehicle_class} · ${(lang === 'en' ? edit.city?.name_en : edit.city?.name_ar) ?? ''}` : ''}
         footer={
-          <Button loading={busy} onClick={() => void save()}>
-            {t('حفظ', 'Save')}
-          </Button>
+          review ? (
+            <span className="flex gap-2">
+              <Button variant="secondary" disabled={busy} onClick={() => setReview(null)}>
+                {t('رجوع للتعديل', 'Back to edit')}
+              </Button>
+              <Button variant="danger" loading={busy} onClick={() => void apply()}>
+                {t('تأكيد وتطبيق على الأسعار المباشرة', 'Confirm and apply to live prices')}
+              </Button>
+            </span>
+          ) : (
+            <Button onClick={toReview}>{t('مراجعة التغييرات', 'Review changes')}</Button>
+          )
         }
       >
-        <div className="grid grid-cols-2 gap-3">
-          {TARIFF_FIELDS.map((f) => (
-            <Field key={f.key} label={`${lang === 'en' ? f.en : f.ar}${f.unit === 'sar' ? ' (SAR)' : ''}`}>
-              <Input dir="ltr" inputMode="decimal" className="num" value={draft[f.key] ?? ''} onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value.replace(/[^\d.]/g, '') })} />
-            </Field>
-          ))}
-        </div>
+        {review ? (
+          <div className="space-y-3">
+            <p className="text-sm text-mute">{t('ستُطبَّق هذه القيم فوراً على كل طلبات الرحلات الجديدة في هذه المدينة والفئة.', 'These values apply immediately to every new trip request in this city and class.')}</p>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-start text-[12px] text-mute">
+                  <th className="py-1 text-start font-medium">{t('البند', 'Item')}</th>
+                  <th className="py-1 text-start font-medium">{t('الحالي', 'Current')}</th>
+                  <th className="py-1 text-start font-medium">{t('الجديد', 'New')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {review.changes.map((c) => (
+                  <tr key={c.key} className="border-t border-line">
+                    <td className="py-2">{label(c.key)}</td>
+                    <td className="num py-2 text-mute line-through">{toInput(c.from)}</td>
+                    <td className="num py-2 font-semibold">{toInput(c.to)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            {TARIFF_KEYS.map((k) => (
+              <Field key={k} label={label(k)} hint={`${t('المسموح', 'Allowed')}: ${range(k)}`} error={errorText(k, errors[k])}>
+                <Input dir="ltr" inputMode="decimal" className="num" invalid={!!errors[k]} value={draft[k] ?? ''} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} />
+              </Field>
+            ))}
+          </div>
+        )}
       </Drawer>
     </div>
   )

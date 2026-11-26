@@ -1492,3 +1492,39 @@ describe('PDPL for in-trip chat (migration 019): export and erasure cover ride_m
   })
 })
 
+// ────────────────────────────────────────────────────────────────────────────
+describe('tariff bounds (migration 020) for the admin Pricing page', () => {
+  let tariffId: string
+  const upd = (who: string, col: string, v: number) =>
+    as(who, async (tx) => (await tx.query(`update tariffs set ${col} = $2 where id = $1 returning id`, [tariffId, v])).rows)
+
+  beforeAll(async () => {
+    tariffId = (await one<{ id: string }>('service', `select t.id from tariffs t join cities c on c.id = t.city_id where c.code = 'riyadh' and t.vehicle_class = 'go' and t.is_active`)).id
+  })
+
+  it('every seeded tariff satisfies the new bounds', async () => {
+    const bad = await rows('service', `select id from tariffs where not (base_fare_halalas between 0 and 10000 and per_km_halalas between 50 and 2000
+      and per_min_halalas between 0 and 500 and min_fare_halalas between 500 and 20000 and cancellation_fee_halalas between 0 and 10000)`)
+    expect(bad).toEqual([])
+  })
+
+  it('rejects zero / out-of-range values from staff with pricing.edit', async () => {
+    await expect(upd(finance, 'per_km_halalas', 0)).rejects.toThrow(/tariffs_per_km_bounds/)
+    await expect(upd(finance, 'per_km_halalas', 2001)).rejects.toThrow(/tariffs_per_km_bounds/)
+    await expect(upd(finance, 'base_fare_halalas', 10001)).rejects.toThrow(/tariffs_base_fare_bounds/)
+    await expect(upd(finance, 'base_fare_halalas', -1)).rejects.toThrow(/base_fare/)
+    await expect(upd(finance, 'per_min_halalas', 501)).rejects.toThrow(/tariffs_per_min_bounds/)
+    await expect(upd(finance, 'min_fare_halalas', 499)).rejects.toThrow(/tariffs_min_fare_bounds/)
+    await expect(upd(finance, 'cancellation_fee_halalas', 10001)).rejects.toThrow(/tariffs_cancellation_fee_bounds/)
+    await expect(upd(finance, 'commission_bps', 5001)).rejects.toThrow(/commission/)
+  })
+
+  it('accepts valid values at the bounds; staff without pricing.edit change nothing', async () => {
+    const before = await one<{ per_km_halalas: number }>('service', `select per_km_halalas from tariffs where id = $1`, [tariffId])
+    expect(await upd(finance, 'per_km_halalas', 50)).toHaveLength(1)
+    expect(await upd(finance, 'per_km_halalas', 2000)).toHaveLength(1)
+    expect(await upd(support, 'per_km_halalas', 999)).toEqual([]) // RLS: no pricing.edit → no row
+    expect(await upd(finance, 'per_km_halalas', before.per_km_halalas)).toHaveLength(1) // restore for later tests
+    expect((await one<{ per_km_halalas: number }>('service', `select per_km_halalas from tariffs where id = $1`, [tariffId])).per_km_halalas).toBe(before.per_km_halalas)
+  })
+})

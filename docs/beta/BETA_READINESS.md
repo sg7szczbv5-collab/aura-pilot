@@ -72,6 +72,13 @@ captain resubmission, rejection-reason flows.
 - `supabase/migrations/20261203000100_ride_messages.sql` (additive, no data change):
   participants-only read/write, writes only while the ride is active, sender set by the
   database, staff read with `trips.view`, Realtime, 30-day retention job.
+- `supabase/migrations/20261204000100_ride_messages_privacy.sql` (019): `private.erase_user`
+  also anonymises the user's chat messages and `export_my_data` includes the messages the
+  user sent (functions copied from their latest versions with only these additions).
+- `supabase/migrations/20261205000100_tariff_bounds.sql` (020): server-side bounds for tariff
+  edits (`NOT VALID`: enforced on new / edited rows), mirrored by
+  `src/apps/admin/live/tariffValidation.ts`; the Pricing page rejects empty / malformed /
+  out-of-range input and requires a review (old → new) and explicit confirmation.
 - `supabase/functions/_shared/requestRide.ts`: duplicate-request message.
 
 ### Repository / ops
@@ -111,7 +118,7 @@ captain resubmission, rejection-reason flows.
 |---|---|
 | TypeScript (app) `npm run typecheck` | pass |
 | TypeScript (Edge Functions) `npm run typecheck:functions` | pass |
-| Unit + DB + server E2E `npm test` | **237 passed / 0 failed** (14 files) |
+| Unit + DB + server E2E `npm test` | **250 passed / 0 failed** (15 files) |
 | UI E2E `npm run e2e:ui` (full trip) | **16 / 16 steps passed**, 0 JS errors |
 | Build `npm run build` | pass |
 | Preflight (development) | 29/31 — 2 config warnings |
@@ -164,7 +171,7 @@ permissions are proven by DB tests. Not run against a live project (no credentia
    `dispatch-tick` function scheduled.
 7. Run `npm run preflight -- --target staging` with the BETA env (must be green) and check
    *System readiness* in the admin console after deploying.
-8. **Rollback**: deploy BETA from a tag; migrations are additive (this branch adds one table);
+8. **Rollback**: deploy BETA from a tag; migrations are additive (this branch adds one table, redefines the two privacy functions and adds tariff bounds);
    Supabase PITR / daily backups on the BETA project; Vercel instant rollback.
 9. **Monitoring**: `health` Edge Function (with `HEALTH_SECRET`) on an uptime monitor;
    Supabase logs for Edge Functions; admin *System readiness*.
