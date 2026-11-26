@@ -1,4 +1,4 @@
-# AURA BETA security (migrations 021, 022 and 023)
+# AURA BETA security (migrations 021–024)
 
 The controls that keep a closed BETA from moving real money, talking to Elm, or letting in strangers, and keep a BETA from ever being taken for production.
 
@@ -79,7 +79,7 @@ A blocked or revoked account may still hold a valid access token. Every operatio
 
 - The two "allowed" lists are pinned by a test: any new user-callable writer or RLS-writable table must be classified, or the suite fails.
 - The integrity check also verifies that the 8 RPC checks and the 6 triggers are in place.
-- Not covered: Storage uploads (documents, avatar files) are governed by Storage policies. A blocked account can upload a file, but cannot attach it (the `driver_documents` or `profiles` write is refused).
+- **Storage (migration 024):** restrictive policies on `storage.objects`. A blocked account cannot upload, replace or delete any file, and can read **only its own folder**: its own documents stay downloadable as a PDPL access right, while other users' avatars and documents are hidden. Blocked staff also lose document access through `admin_can`. The integrity check verifies the four policies.
 
 ## 3. Privileges: before and after
 
@@ -123,6 +123,7 @@ The `ops_guard` schema:
 | F3 | `tests/betaSecurity.test.ts` | template is mock-only with no provider credential keys; filled template passes every BETA blocker; docs contain no test-key wording (proven to catch the old text); any Moyasar secret refused |
 | F2 (023) | `tests/db/beta_security.test.ts` | the same token before and after the block for 17 operations (money, payment methods, ride creation, rating, IBAN / bank / going online, profile, rider data, vehicle, document, location); nothing written; no self-unblock; trip in progress finished (chat, share, offline, completion); unaffected account unaffected; sessions or refresh-token deletion failing separately; catalog regression guard; integrity watches the controls |
 | F3 (browser) | `tests/betaPayments.test.ts`, `scripts/e2e-beta-payments.cjs` | policy matrix (BETA with key, provider or both refused; production needs an explicit provider); tokenizer `disabled` never calls fetch; network guard blocks fetch, XHR and sendBeacon to Moyasar; build fails for each Moyasar setting in staging / Preview and passes in production; the real browser on a mock-only build sends no request to Moyasar; preflight and Edge lists identical; whole-repo doc scan |
+| 024 | `tests/db/beta_security.test.ts`, `tests/betaReadiness.test.ts` | Storage: 4 restrictive policies; active user unaffected; blocked user cannot upload, replace or delete, reads only own folder; blocked staff lose document access; integrity notices a missing policy · `my_environment()` (authenticated only; beta / production / null) · BETA build bound to `BETA_PROJECT_REF`, never the production ref · runtime sign-out off BETA · no secret in any `VITE_` / `NEXT_PUBLIC_` variable (real builds fail) |
 | F4 | `tests/db/beta_security.test.ts` | staff e-mail (case/spaces), e-mail + phone, unlisted staff refused at creation, revoked staff blocked and loses `admin_can`; integrity stays green |
 | F5 | same | no rows for repeated healthy checks; one row per failure, per new failure set, per recovery; `failing_since`; purge ≥ 365 days; recent rows undeletable even with a forged flag; audit logs undeletable |
 | F6 | both | what stops and what runs during a failure; recovery without manual reset (DB and runtime) |
@@ -149,22 +150,33 @@ The `ops_guard` schema:
 
 ## 5. BETA execution: step by step, with stop points
 
-Every step outside the repository needs **explicit human approval** first. Never touch the production project.
+Every step outside the repository needs **explicit human approval** first. Never touch the production project, its Supabase organisation or its Vercel team. The settings for each step (projects, variables, secrets) are in `docs/beta/BETA_ENVIRONMENT.md`.
 
 | Step | Action | Who | Stop point |
 |---|---|---|---|
-| S0 | Review and approve this PR (and PR #4). Neither is merged by this work. | reviewer | **STOP:** approval to proceed |
-| S1 | Create a **new** Supabase project for BETA on the chosen plan. Record its ref from the dashboard. Enable pg_cron and PostGIS. | owner | **STOP:** confirm the ref, plan, region and cost |
-| S2 | In Auth settings, disable sign-ups (phone and email); set the JWT expiry (e.g. 10 min). | owner | **STOP:** screenshot of the settings |
-| S3 | GitHub environment `staging`: set `vars.SUPABASE_PROJECT_REF` = BETA ref and `VITE_SUPABASE_URL` = `https://<beta-ref>.supabase.co`. `PAYMENT_PROVIDER`, `VITE_PAYMENT_PROVIDER`, `PAYOUT_PROVIDER` and `WASL_MODE` = `mock`. No Moyasar, Wasl or bank secrets at all. | owner | **STOP:** `npm run preflight -- --target staging --env-file .env.beta` is green locally, **and** a reviewer confirms that the GitHub `staging` environment and the Vercel Preview environment hold no production Supabase URL or key, and no Moyasar or Elm value |
-| S4 | Run Deploy → `staging`. Preflight passes, migrations 001–021 apply, then the **environment gate stops the run** (no marker yet). This is expected. | owner | **STOP:** confirm the run stopped at the gate, before any function deploy |
-| S5 | In the BETA SQL editor (as postgres): `select ops_guard.set_environment('beta', '<beta-ref>');`, then allowlist **every** account by the identity it signs in with, **before** creating it. Riders and captains (phone OTP): `select ops_guard.allow_tester('9665…', 'name');`. Staff (e-mail + password + TOTP): `select ops_guard.allow_tester('name@company', 'staff');`, then create the staff user and `select private.grant_admin(<id>, '<role>');`. Finally `select ops_guard.integrity_check();` must return `ok: true`. | owner | **STOP:** paste the allowlist (identities only) and the integrity result |
-| S6 | Dashboard → Auth → Hooks: Before User Created = `ops_guard.hook_before_user_created`; Custom Access Token = `ops_guard.hook_custom_access_token`. | owner | **STOP:** confirm both hooks are enabled |
-| S7 | Re-run Deploy → `staging`. The gate passes and the functions deploy. Run M1–M6. | owner + reviewer | **STOP:** M1–M6 results recorded; any failure means stop and roll back the functions |
-| S8 | Publish the BETA hosting build (Vercel Preview or a separate project), with an uptime monitor on `/health` (alert on two 503s in a row). | owner | **STOP:** monitor alert tested (M2) |
-| S9 | Invite allowlisted testers. To revoke: `select ops_guard.revoke_tester('9665…' or 'name@company');`. Read the result: if `sessions` or `refresh_tokens` is `failed:…`, the tester is blocked but sessions were **not** deleted, so the Auth ban (Admin API) is mandatory. Ban in every case. | owner | ongoing |
+| S0 | Approve PRs #4–#8 **for a branch deployment only**: no merge into `main`. The BETA source is the head of the PR #8 branch (`claude/beta-readiness-gate`); record its commit SHA. | reviewer | **STOP:** approval and the SHA to deploy |
+| S1 | Create a **separate** Supabase organisation and a **new** BETA project in it (plan, region and cost per `BETA_ENVIRONMENT.md` §1). Record its ref from the dashboard. Enable pg_cron and PostGIS **before** any migration. | owner | **STOP:** confirm the ref, plan, region and cost |
+| S2 | Auth settings: disable sign-ups (phone and e-mail). JWT expiry 600 s or less. Enable TOTP MFA. Phone sign-in: test numbers with fixed codes (§5c) and a **Test OTPs Valid Until** date at the end of the BETA. | owner | **STOP:** screenshot of the settings (no codes in the screenshot) |
+| S3 | GitHub environment `staging`: the variables in `BETA_ENVIRONMENT.md` §3 (BETA ref, URL, `BETA_PROJECT_REF`, `VITE_APP_ENV=staging`, every provider `mock`). **No** `MOYASAR_*`, `WASL_APP_*` or bank value at all. Restrict the environment's deployment branches to the BETA branch. Run `npm run preflight -- --target staging --env-file .env.beta` locally (green). | owner | **STOP:** green preflight; a reviewer checks the variable names |
+| S3a | **Vercel check (D7):** in the *existing* `aura-pilot` project, confirm that no **Preview** variable holds the production Supabase URL or key, or any Moyasar value. If one does, remove it before going further: every PR preview would otherwise run against production. | owner + reviewer | **STOP:** list of Preview variable *names* reviewed |
+| S4 | Run Deploy → `staging` from the BETA branch (“Use workflow from” = that branch, at the S0 SHA). Preflight passes, migrations **001–024** apply, then the **environment gate stops the run** (no marker yet). This is expected. | owner | **STOP:** the run stopped at the gate, before any function deploy |
+| S5 | BETA SQL editor (as postgres): `select ops_guard.set_environment('beta', '<beta-ref>');`. Allowlist **every** account by the identity it signs in with, **before** creating it. Testers (phone OTP): `select ops_guard.allow_tester('9665…', 'tester');`, using only the test numbers of §5c. Staff (e-mail + password + TOTP): `select ops_guard.allow_tester('name@company', 'staff');`, then create the staff user, `select private.grant_admin(<id>, '<role>');`, and have them **enrol TOTP** before their first admin action (admin RPCs need aal2). Finally `select ops_guard.integrity_check();` must return `ok: true`. | owner | **STOP:** the allowlist (identities only) and the integrity result |
+| S6 | Dashboard → Auth → Hooks: Before User Created = `ops_guard.hook_before_user_created`; Custom Access Token = `ops_guard.hook_custom_access_token`. | owner | **STOP:** both hooks enabled |
+| S7 | Edge Function secrets on the BETA project (`supabase secrets set`, `BETA_ENVIRONMENT.md` §4: mock providers, callback URL, four worker secrets). Schedule `payments-worker` and `wasl-worker` every minute and `privacy-worker` hourly with their `x-cron-secret`. Re-run Deploy → `staging` (same SHA). The gate passes and the functions deploy. Run **M1–M6**. | owner + reviewer | **STOP:** M1–M6 results recorded; any failure means stop and roll back the functions |
+| S8 | Hosting: the **separate** Vercel project `aura-beta` (`BETA_ENVIRONMENT.md` §2), with the variables of §3, Deployment Protection, and an uptime monitor on `/health` (alert on two 503s in a row). The build fails unless `VITE_SUPABASE_URL` is the declared BETA project; after sign-in the app checks `my_environment() = 'beta'`. | owner | **STOP:** monitor alert tested (M2); protection checked from a signed-out browser |
+| S9 | Invite allowlisted testers (test numbers only, no real customer data). To revoke: `select ops_guard.revoke_tester('9665…' or 'name@company');`. Read the result: if `sessions` or `refresh_tokens` is `failed:…`, the tester is blocked but sessions were **not** deleted. **Ban the user with the Auth Admin API in every case.** | owner | ongoing |
 
-**Rollback:** remove the BETA functions (or set them to refuse by un-setting the hooks or allowlist); the BETA project can be paused or deleted. Production is unaffected throughout.
+## 5c. Phone sign-in for BETA testers (D6)
+
+- **Test numbers with fixed codes,** set in Dashboard → Authentication → Sign In / Providers → Phone → *Test Phone Numbers and OTPs*. Test numbers receive no SMS and don't count toward the SMS limit ([Supabase: test auth flows](https://supabase.com/docs/guides/auth/testing-auth-flows)).
+- **Risk:** anyone who knows a test number and its code can sign in as that user, so the pair is a shared credential. Controls:
+  - one number and one **distinct 6-digit code per tester**, handed over privately
+  - the number is allowlisted (S5), so an unlisted number cannot even be created
+  - **Test OTPs Valid Until** = the BETA end date
+  - `revoke_tester` + ban on exit
+  - the codes are never written to the repository, an issue, a PR or a screenshot
+- **SMS provider:** Supabase still requires one to be configured when the phone provider is enabled, even though test numbers send nothing. Use a provider account with **no SMS credit**, or a sandbox account, so a non-test number cannot receive a real code. **UNVERIFIED:** whether the hosted dashboard accepts the phone provider without valid SMS credentials. Decide during S2.
+- **Numbers:** use numbers the team controls, or numbers outside any range assigned to real subscribers. Never a customer's number.
 
 ## 5a. When integrity fails or is stale (F6): what stops, what continues
 
