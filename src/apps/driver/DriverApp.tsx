@@ -9,7 +9,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Home, History, Wallet, User } from 'lucide-react'
 import { ICON, Surface, ToastHost } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
-import { actions, clearSession, getDriver, getSession, setSession, useEco } from '../../core/store'
+import { clearSession, getDriver, getSession, setSession, useEco } from '../../core/store'
 import { isActive } from '../../core/trip'
 import { TabBar, screenMotion } from '../shared/mobile'
 import { ApplicationStatus, DriverAuth, DriverSplash } from './Onboarding'
@@ -25,8 +25,6 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
   const { t, dir } = useI18n()
   const [stage, setStage] = useState<'splash' | 'auth' | 'main'>(embedded && getSession().driverId ? 'main' : 'splash')
   const [did, setDid] = useState<string | undefined>(() => getSession().driverId)
-  /** Demo re-application after a rejection: phone (9 digits) to prefill the onboarding form. */
-  const [reapplyPhone, setReapplyPhone] = useState<string>()
   const [tab, setTab] = useState<Tab>('home')
   const [perf, setPerf] = useState(false)
   const [inbox, setInbox] = useState(false)
@@ -108,10 +106,7 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
   else if (stage === 'auth' || !driver)
     content = (
       <DriverAuth
-        key={reapplyPhone ?? 'auth'}
-        reapplyPhone={reapplyPhone}
         onAuthed={(id) => {
-          setReapplyPhone(undefined)
           setSession({ driverId: id })
           setDid(id)
           setStage('main')
@@ -126,15 +121,6 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
         driverId={driver.id}
         onApproved={() => { setWasPending(false); setTab('home') }}
         onLogout={logout}
-        // Demo mode only: the server flow cannot yet replace an existing vehicle / approved documents.
-        onReapply={auth.mode === 'mock' ? () => {
-          const digits = driver.phone.replace(/\D/g, '').slice(-9)
-          actions.withdrawDriverApplication(driver.id)
-          clearSession(['driverId'])
-          setDid(undefined)
-          setReapplyPhone(digits)
-          setStage('auth')
-        } : undefined}
       />
     )
   else if (active) content = active.status === 'completed' ? <DriverTripSummary trip={active} onDone={() => dismiss(active.id)} /> : <DriverActiveTrip trip={active} driver={driver} />

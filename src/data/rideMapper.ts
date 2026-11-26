@@ -4,6 +4,7 @@
  * Pure functions — unit-tested.
  */
 import type { Actor, CityId, Customer, Driver, FareBreakdown, PaymentMethodId, Place, Trip, TripStatus, VehicleClassId, Vehicle } from '../core/types'
+import { colorById, colorHex } from './vehicleCatalog'
 
 export type RideViewJson = {
   id: string
@@ -60,7 +61,6 @@ const CITIES: CityId[] = ['riyadh', 'jeddah', 'dammam', 'khobar', 'makkah', 'mad
 const toCity = (c: string): CityId => (CITIES.includes(c as CityId) ? (c as CityId) : 'riyadh')
 
 const LATIN_TO_AR: Record<string, string> = { A: 'أ', B: 'ب', J: 'ح', D: 'د', R: 'ر', S: 'س', X: 'ص', T: 'ط', E: 'ع', G: 'ق', K: 'ك', L: 'ل', Z: 'م', N: 'ن', H: 'ه', U: 'و', V: 'ى' }
-const COLOR_HEX: Record<string, string> = { white: '#F5F5F3', black: '#141516', silver: '#B9BCBE', grey: '#6E7174', gray: '#6E7174', blue: '#2F4E8C', red: '#9C2B2B' }
 
 function stop(kind: 'pu' | 'do', rideId: string, s: { lat: number; lng: number; address: string }): Place {
   return { id: `srv-${kind}-${rideId}`, name: { ar: s.address, en: s.address }, sub: { ar: '', en: '' }, pos: { lat: s.lat, lng: s.lng }, kind: 'pin' }
@@ -201,8 +201,8 @@ export function vehicleFromServer(
     make: ve.make,
     model: ve.model,
     year: ve.year,
-    color: { ar: ve.color, en: ve.color },
-    colorHex: COLOR_HEX[ve.color.toLowerCase()] ?? '#B9BCBE',
+    color: colorById(ve.color) ? { ar: colorById(ve.color)!.ar, en: colorById(ve.color)!.en } : { ar: ve.color, en: ve.color },
+    colorHex: colorHex(ve.color),
     plate: { digits: ve.plate_number, lettersEn: letters, lettersAr: letters.split('').map((l) => LATIN_TO_AR[l] ?? l).join(' ') },
     classId: (ve.class ?? ve.vehicle_class ?? 'go') as VehicleClassId,
     status: 'active',
