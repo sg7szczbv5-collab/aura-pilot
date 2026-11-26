@@ -15,6 +15,7 @@ import { postgis } from '@electric-sql/pglite-postgis'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CONSENT_VERSIONS, REQUIRED_CONSENTS } from '../../src/privacy/consents'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const MIGRATIONS = join(ROOT, 'supabase', 'migrations')
@@ -183,7 +184,7 @@ describe('before the marker exists (fresh project): everything sensitive fails c
     mockPayout = (await db.query<{ id: string }>(
       `insert into payouts (driver_id, amount_halalas, iban, idempotency_key) values ($1, 1000, 'SA0380000000608010167519', 'sec-payout-1') returning id`, [captain])).rows[0].id
     const r = (await db.query<{ r: { ok: boolean; failures: string[] } }>(`select ops_guard.integrity_check() r`)).rows[0].r
-    expect(r).toEqual({ ok: true, failures: [] })
+    expect(r).toEqual({ ok: true, failures: [], failing_since: null })
   })
 })
 
@@ -555,8 +556,10 @@ describe('A11 · closed sign-ups, Auth hooks and tester revocation', () => {
     MFA.add(staff)
     expect((await asUser<{ ok: boolean }>(staff, `select private.admin_can('finance.settle') ok`)).ok).toBe(true)
 
-    expect((await db.query<{ n: number }>(`select ops_guard.revoke_tester('966551000001') n`)).rows[0].n).toBe(1)
-    expect((await db.query<{ n: number }>(`select ops_guard.revoke_tester('966500000077') n`)).rows[0].n).toBe(1)
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('966551000001') r`)).rows[0].r)
+      .toMatchObject({ users: 1, allowlist_removed: true, blocked: 1 })
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('966500000077') r`)).rows[0].r)
+      .toMatchObject({ users: 1, allowlist_removed: true, blocked: 1 })
     expect((await db.query<{ b: boolean }>(`select is_blocked b from profiles where id = $1`, [rider])).rows[0].b).toBe(true)
     const tok = (await db.query<{ r: Record<string, unknown> }>(`select ops_guard.hook_custom_access_token($1) r`,
       [JSON.stringify({ user_id: rider, claims: { sub: rider } })])).rows[0].r
@@ -566,5 +569,326 @@ describe('A11 · closed sign-ups, Auth hooks and tester revocation', () => {
     expect((await asUser<{ ok: boolean }>(staff, `select private.admin_can('finance.settle') ok`)).ok).toBe(false)
     // A blocked account stays acceptable to the integrity check (it is revoked, not unlisted).
     expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// Migration 022 — review fixes F1, F2, F4, F5, F6
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Run owner `setup`, then `fn` in the same transaction, then ALWAYS roll back; returns fn's value. */
+async function inTx<T>(setup: string[], fn: (tx: Transaction) => Promise<T>): Promise<T> {
+  let out: T | undefined
+  try {
+    await db.transaction(async (tx) => {
+      for (const s of setup) await tx.exec(s)
+      out = await fn(tx)
+      throw new Rollback()
+    })
+  } catch (e) {
+    if (!(e instanceof Rollback)) throw e
+  }
+  return out as T
+}
+const val = async <T>(tx: Transaction, sql: string, p: unknown[] = []) => (await tx.query<{ v: T }>(sql, p)).rows[0].v
+// Breaks a control unrelated to the money tables, so the money triggers themselves stay active.
+const INTEGRITY_FAILED = [`alter table ops_guard.allowlist disable trigger allowlist_no_truncate`, `select ops_guard.integrity_check()`]
+const TRIGGERS_DISABLED = [`alter table public.payment_methods disable trigger aa_ops_guard_write`, `alter table public.wasl_sync_log disable trigger aa_ops_guard_write`]
+
+describe('F1 · privacy (erase_user, apply_retention, redaction) is never blocked — and is not a way around the money guard', () => {
+  let subject: string
+  beforeAll(async () => {
+    subject = await newUser('966552000001')
+    await db.query(`update auth.users set email = 'subject@example.org' where id = $1`, [subject])
+    await db.query(`select save_payment_method($1, 'mock', 'card', 'tok_s1', 'visa', '4242', 12, 2030, 'Subject Holder')`, [subject])
+    await db.query(`select save_payment_method($1, 'mock', 'mada', 'tok_s2', 'mada', '1111', 10, 2031, 'Subject Holder')`, [subject])
+    for (const days of [400, 10]) {
+      await db.query(
+        `insert into public.wasl_sync_log (entity_type, entity_id, operation, provider, status, request_payload, response_payload, created_at, completed_at)
+         values ('driver', $1, 'eligibility_check', 'mock', 'success', '{"national_id":"1070000001"}', '{"ok":true}', now() - make_interval(days => $2), now() - make_interval(days => $2))`,
+        [subject, days])
+    }
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+
+  const scenarios: [string, string[]][] = [
+    ['healthy, triggers enabled', []],
+    ['marker missing', MARKER_MISSING],
+    ['marker corrupt', MARKER_CORRUPT],
+    ['integrity failed', INTEGRITY_FAILED],
+    ['guard triggers disabled', TRIGGERS_DISABLED],
+  ]
+  for (const [name, setup] of scenarios) {
+    it(`erase_user + apply_retention succeed and redact real data — ${name}`, async () => {
+      const r = await inTx(setup, async (tx) => {
+        const before = await val<string>(tx, `select (select count(*) from payments) || '/' || (select count(*) from payouts) || '/' || (select count(*) from wasl_sync_log) v`)
+        await tx.query(`select private.erase_user($1)`, [subject])
+        await tx.query(`select private.apply_retention()`)
+        const cards = (await tx.query<{ provider: string; deleted: boolean; holder: string | null; def: boolean; last4: string }>(
+          `select provider, deleted_at is not null deleted, holder_name holder, is_default def, last4 from payment_methods where rider_id = $1 order by last4`, [subject])).rows
+        const wasl = (await tx.query<{ old: boolean; req: unknown; provider: string }>(
+          `select created_at < now() - interval '365 days' old, request_payload req, provider from wasl_sync_log where entity_id = $1 order by created_at`, [subject])).rows
+        const after = await val<string>(tx, `select (select count(*) from payments) || '/' || (select count(*) from payouts) || '/' || (select count(*) from wasl_sync_log) v`)
+        const live = await val<number>(tx, `select ((select count(*) from payments where provider::text in ('moyasar','hyperpay')) + (select count(*) from payouts where provider <> 'mock') + (select count(*) from wasl_sync_log where provider <> 'mock'))::int v`)
+        const exemptions = await val<number>(tx, `select count(*)::int v from ops_guard.guard_exemptions`)
+        return { before, after, cards, wasl, live, exemptions }
+      })
+      // Card data redacted, nothing financial changed.
+      expect(r.cards).toEqual([
+        { provider: 'mock', deleted: true, holder: null, def: false, last4: '1111' },
+        { provider: 'mock', deleted: true, holder: null, def: false, last4: '4242' },
+      ])
+      // Retention redacted only the payload past retention (365 days); the recent one stays.
+      expect(r.wasl).toEqual([{ old: true, req: null, provider: 'mock' }, { old: false, req: { national_id: '1070000001' }, provider: 'mock' }])
+      // No payment, payout or Wasl submission was created; nothing live exists.
+      expect(r.after).toBe(r.before)
+      expect(r.live).toBe(0)
+      // Redactions in a degraded environment are recorded for investigation; none when healthy or when the trigger did not run.
+      const degraded = name === 'marker missing' || name === 'marker corrupt' || name === 'integrity failed'
+      expect(r.exemptions > 0, `exemptions logged: ${name}`).toBe(degraded)
+    })
+  }
+
+  it('a live-provider card is redacted too (no provider change, no payment, no external call possible from SQL)', async () => {
+    const r = await inTx([`alter table public.payment_methods disable trigger aa_ops_guard_write`,
+      `insert into public.payment_methods (rider_id, provider, method_type, brand, last4, exp_month, exp_year, holder_name) values ('${subject}', 'moyasar', 'card', 'visa', '9999', 1, 2030, 'Live Holder')`,
+      `alter table public.payment_methods enable always trigger aa_ops_guard_write`, ...INTEGRITY_FAILED], async (tx) => {
+      await tx.query(`select private.erase_user($1)`, [subject])
+      return (await tx.query(`select provider, deleted_at is not null deleted, holder_name from payment_methods where rider_id = $1 and last4 = '9999'`, [subject])).rows[0]
+    })
+    expect(r).toEqual({ provider: 'moyasar', deleted: true, holder_name: null })
+  })
+
+  // The exemption is a SHAPE, not a bypass: anything that is not a pure redaction is still refused.
+  const abuse: [string, string][] = [
+    ['switch provider to moyasar', `update public.payment_methods set provider = 'moyasar' where rider_id = '__S__'`],
+    ['redaction + provider change in one statement', `update public.payment_methods set holder_name = null, provider = 'moyasar' where rider_id = '__S__'`],
+    ['un-delete a card', `update public.payment_methods set deleted_at = null where rider_id = '__S__' and last4 = '4242'`],
+    ['change card digits', `update public.payment_methods set last4 = '0000' where rider_id = '__S__'`],
+    ['set (not clear) the holder', `update public.payment_methods set holder_name = 'Someone' where rider_id = '__S__'`],
+    ['make a card default', `update public.payment_methods set is_default = true where rider_id = '__S__' and last4 = '1111'`],
+    ['insert a mock card', `insert into public.payment_methods (rider_id, provider, method_type) values ('__S__', 'mock', 'card')`],
+    ['write a Wasl payload', `update public.wasl_sync_log set request_payload = '{"x":1}' where entity_id = '__S__'`],
+    ['switch Wasl provider', `update public.wasl_sync_log set provider = 'wasl' where entity_id = '__S__'`],
+    ['change Wasl status', `update public.wasl_sync_log set status = 'failed' where entity_id = '__S__'`],
+    ['no-op update on payments (no redaction shape for money)', `update public.payments set status = status`],
+    ['no-op update on payouts (no redaction shape for money)', `update public.payouts set status = status`],
+  ]
+  for (const [label, sql] of abuse) {
+    it(`refused in a degraded environment: ${label}`, async () => {
+      for (const setup of [MARKER_MISSING, INTEGRITY_FAILED]) {
+        // Start from an erased subject (deleted cards, redacted payloads), so "un-delete" has rows to act on.
+        const o = await attempt('owner', sql.replace('__S__', subject), [], [`select private.erase_user('${subject}')`, ...setup])
+        expect(o, `${label}`).toMatch(/^(marker_missing|integrity_refused|live_refused)$/)
+      }
+    })
+  }
+
+  it('in a healthy BETA a non-redaction live change is still refused (live check unchanged)', async () => {
+    expect(await attempt('owner', `update public.payment_methods set holder_name = null, provider = 'moyasar' where rider_id = '${subject}'`)).toBe('live_refused')
+    expect(await attempt('owner', `update public.wasl_sync_log set request_payload = null, provider = 'wasl' where entity_id = '${subject}'`)).toBe('live_refused')
+  })
+
+  it('privacy functions keep their access control: only the service role (privacy worker) may call them; Wasl live stays refused', async () => {
+    expect(await attempt('service', `select private.erase_user($1)`, [subject])).toBe('ok') // the authorised caller, unchanged
+    for (const who of ['anon', rider2]) {
+      expect(await attempt(who, `select private.erase_user($1)`, [subject]), who).toBe('permission_denied')
+      expect(await attempt(who, `select private.apply_retention()`), who).toBe('permission_denied')
+    }
+    expect(await attempt('service', `select record_wasl_result('driver', $1, 'eligibility_check', 'wasl', true)`, [subject], INTEGRITY_FAILED)).toBe('integrity_refused')
+  })
+
+  it('the exemption log is append-only and unreadable by API roles', async () => {
+    const row = [`insert into ops_guard.guard_exemptions (table_name, marker_state) values ('payment_methods', 'missing')`]
+    expect(await attempt('owner', `delete from ops_guard.guard_exemptions`, [], row)).toMatch(/append-only/)
+    expect(await attempt('owner', `update ops_guard.guard_exemptions set actor = 'x'`, [], row)).toMatch(/append-only/)
+    expect(await attempt('service', `select * from ops_guard.guard_exemptions`)).toBe('permission_denied')
+  })
+})
+
+describe('F2 · revoke_tester: allowlist + block always, sessions best-effort and reported truthfully', () => {
+  const AUTH_TABLES = [
+    `create table auth.sessions (id uuid primary key default gen_random_uuid(), user_id uuid not null)`,
+    `create table auth.refresh_tokens (id bigserial primary key, user_id varchar(255), token text)`,
+  ]
+  const seed = (uid: string) => [`insert into auth.sessions (user_id) values ('${uid}'), ('${uid}')`, `insert into auth.refresh_tokens (user_id, token) values ('${uid}', 't1')`]
+
+  it('deletes sessions and refresh tokens when it can, and says how many', async () => {
+    const u = await newUser('966553000001')
+    const r = await inTx([...AUTH_TABLES, ...seed(u)], async (tx) => ({
+      res: await val<Record<string, unknown>>(tx, `select ops_guard.revoke_tester('966553000001') v`),
+      left: await val<number>(tx, `select ((select count(*) from auth.sessions) + (select count(*) from auth.refresh_tokens))::int v`),
+    }))
+    expect(r.res).toMatchObject({ users: 1, allowlist_removed: true, blocked: 1, sessions: 'deleted:2', refresh_tokens: 'deleted:1' })
+    expect(r.left).toBe(0)
+  })
+
+  it('a failing session delete does NOT undo the allowlist removal or the block, and is reported as failed', async () => {
+    const u = await newUser('966553000002')
+    const deny = [`create function auth.deny_delete() returns trigger language plpgsql as $$ begin raise exception 'permission denied for table sessions' using errcode = '42501'; end $$`,
+      `create trigger deny before delete on auth.sessions for each row execute function auth.deny_delete()`]
+    const r = await inTx([...AUTH_TABLES, ...seed(u), ...deny], async (tx) => ({
+      res: await val<Record<string, unknown>>(tx, `select ops_guard.revoke_tester('966553000002') v`),
+      listed: await val<boolean>(tx, `select exists (select 1 from ops_guard.allowlist where identity = '966553000002') v`),
+      blocked: await val<boolean>(tx, `select is_blocked v from profiles where id = $1`, [u]),
+      sessionsLeft: await val<number>(tx, `select count(*)::int v from auth.sessions`),
+      log: (await tx.query(`select users, allowlist_removed, blocked, sessions, refresh_tokens from ops_guard.revocation_log order by id desc limit 1`)).rows[0],
+      payment: await tx.query(`select create_payment_intent($1, 'wallet_topup', null, 5000, 'card', 'mock', null)`, [u]).then(() => 'ok', (e: Error) => e.message),
+    }))
+    expect(r.res).toMatchObject({ allowlist_removed: true, blocked: 1, sessions: 'failed:42501', refresh_tokens: 'deleted:1' })
+    expect(r.listed).toBe(false)
+    expect(r.blocked).toBe(true)
+    expect(r.sessionsLeft).toBe(2) // not claimed as revoked
+    expect(r.log).toEqual({ users: 1, allowlist_removed: true, blocked: 1, sessions: 'failed:42501', refresh_tokens: 'deleted:1' })
+    expect(r.payment).toMatch(/account is blocked/) // sensitive RPCs refuse at once via is_blocked
+  })
+
+  it('without the auth tables it reports "absent"; an unknown identity still leaves a log entry', async () => {
+    const u = await newUser('966553000003')
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('966553000003') r`)).rows[0].r)
+      .toMatchObject({ users: 1, allowlist_removed: true, blocked: 1, sessions: 'absent', refresh_tokens: 'absent' })
+    expect((await db.query<{ b: boolean }>(`select is_blocked b from profiles where id = $1`, [u])).rows[0].b).toBe(true)
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('966559999999') r`)).rows[0].r)
+      .toMatchObject({ users: 0, allowlist_removed: false, blocked: 0 })
+    await expect(db.query(`select ops_guard.revoke_tester('')`)).rejects.toThrow(/identity required/)
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+})
+
+describe('F4 · staff (e-mail) and testers (phone) on the same allowlist', () => {
+  it('an allowlisted staff e-mail (any case / spaces) can be created, made admin, and integrity stays green', async () => {
+    await db.query(`select ops_guard.allow_tester('  Ops.Lead@Aura.SA ', 'staff')`)
+    expect((await db.query<{ i: string }>(`select identity i from ops_guard.allowlist where identity like '%@%' order by added_at desc limit 1`)).rows[0].i).toBe('ops.lead@aura.sa')
+    const staff = (await db.query<{ id: string }>(`insert into auth.users (email) values ('ops.lead@aura.sa') returning id`)).rows[0].id
+    await db.query(`select private.grant_admin($1, 'customer_support')`, [staff])
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.hook_before_user_created('{"user":{"email":"OPS.LEAD@aura.sa"}}') r`)).rows[0].r).toEqual({})
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.hook_custom_access_token($1) r`, [JSON.stringify({ user_id: staff, claims: { sub: staff, aal: 'aal2' } })])).rows[0].r)
+      .toEqual({ claims: { sub: staff, aal: 'aal2' } })
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+
+  it('a staff account with both e-mail and phone is accepted when either is allowlisted', async () => {
+    await db.query(`select ops_guard.allow_tester('finance.two@aura.sa')`)
+    await db.query(`insert into auth.users (email, phone) values ('finance.two@aura.sa', '966554000002')`)
+    await db.query(`select ops_guard.allow_tester('+966 55 400 0003')`)
+    await db.query(`insert into auth.users (email, phone) values ('unlisted.mail@aura.sa', '966554000003')`)
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+
+  it('an unlisted staff account is refused at creation, so it can never turn integrity red', async () => {
+    await expect(db.query(`insert into auth.users (email) values ('not.listed@aura.sa')`)).rejects.toThrow(/sign-ups are closed/)
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.hook_before_user_created('{"user":{"email":"not.listed@aura.sa"}}') r`)).rows[0].r)
+      .toMatchObject({ error: { http_code: 403 } })
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+
+  it('a revoked staff e-mail is blocked and loses admin rights; integrity stays green (revoked ≠ unlisted)', async () => {
+    const staff = (await db.query<{ id: string }>(`select id from auth.users where email = 'ops.lead@aura.sa'`)).rows[0].id
+    MFA.add(staff)
+    expect((await asUser<{ ok: boolean }>(staff, `select private.admin_can('support.view') ok`)).ok).toBe(true)
+    expect((await db.query<{ r: Record<string, unknown> }>(`select ops_guard.revoke_tester('OPS.LEAD@aura.sa') r`)).rows[0].r).toMatchObject({ users: 1, blocked: 1 })
+    expect((await asUser<{ ok: boolean }>(staff, `select private.admin_can('support.view') ok`)).ok).toBe(false)
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+})
+
+describe('F5 · integrity history: one row per change, failing_since, retention ≥ 365 days', () => {
+  const events = (tx: Transaction) => val<number>(tx, `select count(*)::int v from ops_guard.integrity_events`)
+
+  it('repeated healthy checks add no rows', async () => {
+    const r = await inTx([], async (tx) => {
+      const a = await events(tx)
+      for (let i = 0; i < 5; i++) await tx.query(`select ops_guard.integrity_check()`)
+      return (await events(tx)) - a
+    })
+    expect(r).toBe(0)
+  })
+
+  it('a lasting failure is one row (failing_since stays put); a new failure set is one more; recovery is one more', async () => {
+    const r = await inTx([], async (tx) => {
+      const a = await events(tx)
+      await tx.exec(`alter table public.payouts disable trigger aa_ops_guard_write`)
+      await tx.query(`select ops_guard.integrity_check()`)
+      const since1 = await val<string>(tx, `select failing_since::text v from ops_guard.integrity_status`)
+      await tx.exec(`select pg_sleep(0.01)`)
+      for (let i = 0; i < 4; i++) await tx.query(`select ops_guard.integrity_check()`)
+      const afterSame = (await events(tx)) - a
+      const since2 = await val<string>(tx, `select failing_since::text v from ops_guard.integrity_status`)
+      await tx.exec(`alter table public.payments disable trigger aa_ops_guard_write`)
+      await tx.query(`select ops_guard.integrity_check()`)
+      const afterNew = (await events(tx)) - a
+      await tx.exec(`alter table public.payouts enable always trigger aa_ops_guard_write`)
+      await tx.exec(`alter table public.payments enable always trigger aa_ops_guard_write`)
+      const rec = await val<{ ok: boolean; failing_since: string | null }>(tx, `select ops_guard.integrity_check() v`)
+      const last = (await tx.query<{ ok: boolean }>(`select ok from ops_guard.integrity_events order by id desc limit 1`)).rows[0]
+      return { afterSame, afterNew, same: since1 === since2 && since1 !== null, rec, total: (await events(tx)) - a, last }
+    })
+    expect(r).toEqual({ afterSame: 1, afterNew: 2, same: true, rec: { ok: true, failures: [], failing_since: null }, total: 3, last: { ok: true } })
+  })
+
+  it('purge keeps ≥ 365 days, deletes only older rows; nobody can delete recent history; audit logs are never purged', async () => {
+    const r = await inTx([
+      `insert into ops_guard.integrity_events (ok, failures, created_at) values (false, '["old"]', now() - interval '500 days'), (false, '["recent"]', now() - interval '200 days')`,
+    ], async (tx) => {
+      await tx.query(`savepoint p`)
+      const tooShort = await tx.query(`select ops_guard.purge_integrity_events(100)`).then(() => 'ok', async (e: Error) => { await tx.query(`rollback to savepoint p`); return e.message })
+      const purged = await val<number>(tx, `select ops_guard.purge_integrity_events(400) v`)
+      const left = (await tx.query<{ f: string[] }>(`select failures f from ops_guard.integrity_events where created_at < now() - interval '100 days'`)).rows.map((x) => x.f)
+      return { tooShort, purged, left }
+    })
+    expect(r.tooShort).toMatch(/at least 365 days/)
+    expect(r.purged).toBe(1)
+    expect(r.left).toEqual([['recent']])
+    expect(await attempt('owner', `delete from ops_guard.integrity_events`)).toMatch(/append-only/)
+    // Even with the purge flag forged, a recent row cannot be deleted.
+    expect(await attempt('owner', `delete from ops_guard.integrity_events where created_at > now() - interval '1 day'`, [],
+      [`insert into ops_guard.integrity_events (ok, failures) values (false, '["x"]')`, `select set_config('ops_guard.history_purge', 'on', true)`])).toMatch(/append-only/)
+    const rowsIn = [`insert into ops_guard.guard_exemptions (table_name, marker_state) values ('payment_methods', 'missing')`]
+    for (const t of ['allowlist_log', 'guard_exemptions', 'revocation_log']) {
+      expect(await attempt('owner', `select count(*) from ops_guard.${t}`, [], rowsIn), t).toBe('ok')
+      expect(await attempt('owner', `delete from ops_guard.${t}`, [], rowsIn), t).toMatch(/append-only/)
+      expect(await attempt('owner', `truncate ops_guard.${t}`), t).toMatch(/append-only/)
+    }
+  })
+
+  it('the integrity check watches the audit triggers too', async () => {
+    const r = await peek<{ r: { failures: string[] } }>('owner', `select ops_guard.integrity_check() r`, [], [`alter table ops_guard.revocation_log disable trigger revocation_log_append_only`])
+    expect(r.r.failures).toContain('audit_trigger_not_always:ops_guard.revocation_log')
+  })
+})
+
+describe('F6 · fail closed on integrity failure, automatic recovery when the check is green again', () => {
+  it('what stops and what continues while integrity is failed (database layer)', async () => {
+    const cashRider = await newUser('966556000001')
+    await asUser(cashRider, `select 1`)
+    for (const [purpose, version] of Object.entries(CONSENT_VERSIONS).filter(([k]) => (REQUIRED_CONSENTS.rider as readonly string[]).includes(k))) {
+      await asUser(cashRider, `select record_consent($1, true, $2, 'rider_app')`, [purpose, version])
+    }
+    const r = await inTx(INTEGRITY_FAILED, async (tx) => {
+      const run = (sql: string, p: unknown[] = []) => tx.query(`savepoint s`).then(() => tx.query(sql, p)).then(
+        async () => { await tx.query(`release savepoint s`); return 'runs' },
+        async (e: Error) => { await tx.query(`rollback to savepoint s`); return /AURA_GUARD/.test(e.message) ? 'stops' : 'error:' + e.message })
+      return {
+        card_payment: await run(`select create_payment_intent($1, 'wallet_topup', null, 5000, 'card', 'mock', null)`, [rider2]),
+        payout_batch: await run(`select create_payout_batch()`),
+        wasl_result: await run(`select record_wasl_result('driver', $1, 'eligibility_check', 'mock', true)`, [captain]),
+        save_card: await run(`select save_payment_method($1, 'mock', 'card', 't', 'visa', '4242', 12, 2030)`, [rider2]),
+        cash_ride_in_db: await run(`select create_ride($1, 'riyadh', 'go', 24.7136, 46.6753, 'Olaya', 24.7633, 46.6407, 'KAFD', 10000, 1200, 'cash')`, [cashRider]),
+        erasure: await run(`select private.apply_retention()`),
+      }
+    })
+    expect(r).toEqual({ card_payment: 'stops', payout_batch: 'stops', wasl_result: 'stops', save_card: 'stops', cash_ride_in_db: 'runs', erasure: 'runs' })
+  })
+
+  it('once the cause is fixed and the scheduled check is green, sensitive writes work again with no manual reset', async () => {
+    const r = await inTx(INTEGRITY_FAILED, async (tx) => {
+      const refused = await tx.query(`savepoint a`).then(() => tx.query(`select create_payout_batch()`)).then(() => 'ok', async (e: Error) => { await tx.query(`rollback to savepoint a`); return e.message })
+      await tx.exec(`alter table ops_guard.allowlist enable always trigger allowlist_no_truncate`) // the fix
+      await tx.query(`select ops_guard.integrity_check()`) // the next scheduled run
+      const ok = await tx.query(`select create_payout_batch()`).then(() => 'ok', (e: Error) => e.message)
+      return { refused, ok }
+    })
+    expect(r.refused).toMatch(/integrity check failed/)
+    expect(r.ok).toBe('ok')
   })
 })

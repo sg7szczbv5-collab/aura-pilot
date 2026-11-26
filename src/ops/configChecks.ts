@@ -122,6 +122,9 @@ export function checkConfig(env: Env, target: Target, prodRef: string | null = P
     add('beta_payments_mock', 'beta', 'blocker', provider === 'mock' && (env.VITE_PAYMENT_PROVIDER ?? 'mock') === 'mock', `BETA payments must be mock (PAYMENT_PROVIDER=${provider}, VITE_PAYMENT_PROVIDER=${env.VITE_PAYMENT_PROVIDER ?? 'mock'})`)
     add('beta_no_live_keys', 'beta', 'blocker', !/^sk_live_/.test(sk) && !/^pk_live_/.test(pk) && !Object.values(env).some((v) => typeof v === 'string' && /^(sk|pk)_live_/.test(v)),
       'No Moyasar live key (sk_live_/pk_live_) anywhere in the BETA configuration')
+    const moyasarCreds = ['MOYASAR_SECRET_KEY', 'VITE_MOYASAR_PUBLISHABLE_KEY', 'MOYASAR_WEBHOOK_SECRET', 'MOYASAR_API_BASE_URL'].filter((k) => (env[k] ?? '').trim() !== '')
+    add('beta_no_provider_credentials', 'beta', 'blocker', moyasarCreds.length === 0,
+      moyasarCreds.length === 0 ? 'No Moyasar credential of any kind (test or live) in BETA' : `Remove from BETA (mock only): ${moyasarCreds.join(', ')}`)
     add('beta_wasl_mock', 'beta', 'blocker', wasl === 'mock' && !has(env.WASL_APP_KEY) && !has(env.WASL_APP_ID), `BETA Wasl must be mock with no Elm credentials (WASL_MODE=${wasl})`)
     add('beta_payouts_mock', 'beta', 'blocker', (env.PAYOUT_PROVIDER ?? 'mock') === 'mock', `PAYOUT_PROVIDER=${env.PAYOUT_PROVIDER ?? 'mock'} (bank payouts are not allowed in BETA)`)
   }

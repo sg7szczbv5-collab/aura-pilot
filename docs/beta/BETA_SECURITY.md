@@ -1,9 +1,10 @@
-# AURA BETA security (migration 021)
+# AURA BETA security (migrations 021 and 022)
 
 The controls that keep a closed BETA from moving real money, talking to Elm, or letting in strangers, and keep a BETA from ever being taken for production.
 
 - **Status:** implemented in the repository and tested on PGlite and in unit tests. **Not applied to any Supabase project. Not deployed.**
 - **Production:** live operations stay refused everywhere until `PROD_PROJECT_REF` is verified by a human (see §6).
+- **Policy:** BETA is **mock-only** for payments, payouts and Wasl. No Moyasar credential (test or live) and no Elm credential, enforced by preflight (`beta_no_provider_credentials`, `beta_no_live_keys`, `beta_wasl_mock`, `beta_payments_mock`, `beta_payouts_mock`) and by the runtime guard.
 
 ## 1. Layers
 
@@ -11,7 +12,7 @@ The controls that keep a closed BETA from moving real money, talking to Elm, or 
 |---|---|---|---|
 | P1 | preventive | `anon`, `authenticated` and `service_role` have no `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on `payments`, `payment_methods`, `payouts` or `wasl_sync_log`. The privilege check runs before any trigger, so a disabled trigger cannot be exploited through REST. | migration 021 |
 | P2 | preventive | Each of the 11 sensitive writers calls `ops_guard.assert_environment()` first. Before any non-mock effect, it also calls `ops_guard.assert_live_allowed()`. | migration 021 (bodies regenerated from the latest definitions; only the guard lines are new) |
-| P3 | preventive | `aa_ops_guard_write` (insert/update) and `aa_ops_guard_truncate` on the four tables, **ENABLE ALWAYS**, so they fire under `session_replication_role = replica` too. | migration 021 |
+| P3 | preventive | `aa_ops_guard_write` (insert/update) and `aa_ops_guard_truncate` on the four tables, **ENABLE ALWAYS**, so they fire under `session_replication_role = replica` too. The one exception is a pure **redaction** (§2a), which is never refused. | migrations 021, 022 |
 | Marker | preventive | `ops_guard.environment` holds one immutable row (mode `beta` \| `production`, project ref, digest). Missing or corrupt means everything sensitive is refused. Production requires `project_ref = ops_guard.prod_project_ref()`, which is NULL. | migration 021 |
 | Allowlist | preventive | `ops_guard.allowlist` changes only through `allow_tester()` and `revoke_tester()`. Every change is logged in `allowlist_log`, which is append-only. | migration 021 |
 | D1 | detection | `ops_guard.integrity_check()` runs every minute through pg_cron. It records `integrity_status` and appends `integrity_events` when the state changes. A failure makes every sensitive write refuse. | migration 021 |
@@ -20,7 +21,7 @@ The controls that keep a closed BETA from moving real money, talking to Elm, or 
 | C1 | compensating | BETA has no live credentials. Preflight blocks `sk_live_`/`pk_live_` anywhere, any non-mock payment, payout or Wasl setting, and Elm credentials. Runtime refuses the same. | `src/ops/configChecks.ts`, `runtimeGuard.ts` |
 | C2 | compensating | Identity binding: `ref(SUPABASE_URL)` = marker ref = `PROD_PROJECT_REF` (code constant, never an env var) = `ops_guard.prod_project_ref()`. | both constants are null today |
 | C3 | compensating | Closed sign-ups: disabled in GoTrue (manual), the **Before User Created** hook, a backup `BEFORE INSERT` trigger on `auth.users`, and the **Custom Access Token** hook, which also runs on refresh. | migration 021 |
-| C4 | compensating | `revoke_tester()` removes the tester from the allowlist, sets `is_blocked` and deletes sessions and refresh tokens. The Auth ban is a manual Admin API step. | migration 021 |
+| C4 | compensating | `revoke_tester()` **always** removes the identity from the allowlist and sets `is_blocked` (every sensitive RPC refuses at once). It then *tries* to delete `auth.sessions` and `auth.refresh_tokens`, each on its own, and returns and logs (`revocation_log`) what actually happened: `deleted:n`, `failed:<sqlstate>` or `absent`. Access tokens already issued stay valid until they expire. The Auth ban is a manual Admin API step. | migrations 021, 022 |
 
 **What this does not prevent:** the database owner (`postgres`) can still undo any of it. Against the owner, protection relies on detection (D1 → D2/D3, alerts) and on C1 (no live credentials exist in BETA), not on prevention.
 
@@ -41,10 +42,23 @@ All 13 functions are `SECURITY DEFINER`, owned by `postgres`, with `search_path 
 | `admin_set_payout_status` | payouts | `adminApi.ts` | RPC | authenticated (finance.settle + MFA), service_role | payout provider ≠ mock |
 | `complete_payout` | payouts | (no app caller) | RPC | service_role | payout provider ≠ mock |
 | `record_wasl_result` | wasl_sync_log | `_shared/wasl/worker.ts`, `db.ts` | RPC | service_role | `p_provider <> 'mock'` |
-| `private.erase_user` | payment_methods | `_shared/privacy/cleanup.ts`, SQL | RPC / SQL | service_role | **not gated** (PDPL) |
-| `private.redact_wasl_payloads` | wasl_sync_log | `apply_retention()` (pg_cron) | SQL | service_role | **not gated** (PDPL) |
+| `private.erase_user` | payment_methods | `_shared/privacy/cleanup.ts`, SQL | RPC / SQL | service_role | no P2; its writes are redactions (§2a), never refused |
+| `private.redact_wasl_payloads` | wasl_sync_log | `apply_retention()` (pg_cron) | SQL | service_role | no P2; its writes are redactions (§2a), never refused |
 
 No Edge Function or app code writes these tables through REST (`.from(table).insert/update/delete`); a test checks the files. Because every legitimate path is a `SECURITY DEFINER` function running as `postgres`, revoking the direct privileges (P1) affects none of them, which the suite proves end to end.
+
+## 2a. Privacy versus the money guard (F1)
+
+Rule: **protecting money never blocks a privacy right, and a privacy operation is never a way around the money guard.**
+
+- The P3 trigger lets a write through without checking the environment only when it is a pure **redaction**:
+  - `payment_methods`: only `deleted_at` (null → set), `is_default` (→ false) and `holder_name` (→ null) change.
+  - `wasl_sync_log`: only `request_payload` and `response_payload` (→ null) change.
+  - Every other column must be identical. An `INSERT` is never a redaction. `payments` and `payouts` have no redaction shape at all.
+- A redaction cannot create a payment, a payout, a Wasl submission or any live effect. A redaction combined with any other change in the same statement is refused.
+- Who may redact is unchanged. P1 still forbids direct writes, so only postgres-owned functions get there: `erase_user` (service_role, the privacy worker) and `apply_retention` (pg_cron).
+- A redaction done while the marker is missing or corrupt, or integrity has failed, is recorded in `ops_guard.guard_exemptions` (append-only) for investigation.
+- **Tested** with a user who has real cards and Wasl payloads, in five states: healthy, marker missing, marker corrupt, integrity failed, triggers disabled. Plus 12 abuse attempts that are all refused (provider switch, un-delete, digits change, insert, Wasl payload write, provider or status change, any update on payments or payouts).
 
 ## 3. Privileges: before and after
 
@@ -83,6 +97,13 @@ The `ops_guard` schema:
 | live calls | same | `guardedFetch` blocks Moyasar, Elm and unknown hosts; real fetch never called; Moyasar and Wasl providers built with it cannot connect; Edge entry points guard before building providers |
 | demo | same | live admin modules don't import the demo store; demo-backed admin pages replaced or hidden in Supabase mode; rider promos and inbox empty in Supabase mode |
 
+| F1 | `tests/db/beta_security.test.ts` | erase + retention on real rows in 5 states; live-provider card redacted without provider change; 12 abuse shapes refused; access control kept; exemptions logged |
+| F2 | same | sessions/tokens deleted and counted; a failing delete keeps allowlist removal and block, reported `failed:42501`, logged; `absent` without tables |
+| F3 | `tests/betaSecurity.test.ts` | template is mock-only with no provider credential keys; filled template passes every BETA blocker; docs contain no test-key wording (proven to catch the old text); any Moyasar secret refused |
+| F4 | `tests/db/beta_security.test.ts` | staff e-mail (case/spaces), e-mail + phone, unlisted staff refused at creation, revoked staff blocked and loses `admin_can`; integrity stays green |
+| F5 | same | no rows for repeated healthy checks; one row per failure, per new failure set, per recovery; `failing_since`; purge ≥ 365 days; recent rows undeletable even with a forged flag; audit logs undeletable |
+| F6 | both | what stops and what runs during a failure; recovery without manual reset (DB and runtime) |
+
 ### Manual Required (on the BETA project, during S7)
 
 | # | Check |
@@ -98,7 +119,7 @@ The `ops_guard` schema:
 
 - **`ENABLE ALWAYS` on `auth.users`:** on Supabase, `postgres` may not own `auth.users`. The migration then leaves the trigger in normal mode (a notice is raised) and the integrity check only requires it to be enabled.
 - **Supabase Auth behaviour:** with sign-ups disabled, and the exact hook semantics on sign-up, sign-in, refresh and the Admin API (M3). That includes whether a hook function in the `ops_guard` schema can be selected in the dashboard.
-- **Deleting `auth.sessions` and `auth.refresh_tokens` as `postgres`:** permitted on the target plan? (`revoke_tester` skips missing tables.)
+- **Deleting `auth.sessions` and `auth.refresh_tokens` as `postgres`:** is it permitted on the target plan? `revoke_tester` reports `failed:<sqlstate>` when it isn't, and never claims success. Also unverified: whether GoTrue then refuses the refresh (M3).
 - **`SUPABASE_URL`:** platform-injected and not overridable (M4).
 - **Plan support:** pg_cron, Auth hooks and log retention on the BETA plan. Without pg_cron, integrity runs only through `/health` with the secret, which must then be scheduled.
 - **Production ref:** the real value has not been verified, so `PROD_PROJECT_REF` and `ops_guard.prod_project_ref()` are null.
@@ -112,15 +133,43 @@ Every step outside the repository needs **explicit human approval** first. Never
 | S0 | Review and approve this PR (and PR #4). Neither is merged by this work. | reviewer | **STOP:** approval to proceed |
 | S1 | Create a **new** Supabase project for BETA on the chosen plan. Record its ref from the dashboard. Enable pg_cron and PostGIS. | owner | **STOP:** confirm the ref, plan, region and cost |
 | S2 | In Auth settings, disable sign-ups (phone and email); set the JWT expiry (e.g. 10 min). | owner | **STOP:** screenshot of the settings |
-| S3 | GitHub environment `staging`: set `vars.SUPABASE_PROJECT_REF` = BETA ref and `VITE_SUPABASE_URL` = `https://<beta-ref>.supabase.co`. `PAYMENT_PROVIDER`, `VITE_PAYMENT_PROVIDER`, `PAYOUT_PROVIDER` and `WASL_MODE` = `mock`. No Moyasar, Wasl or bank secrets at all. | owner | **STOP:** `npm run preflight -- --target staging --env-file .env.beta` is green locally |
+| S3 | GitHub environment `staging`: set `vars.SUPABASE_PROJECT_REF` = BETA ref and `VITE_SUPABASE_URL` = `https://<beta-ref>.supabase.co`. `PAYMENT_PROVIDER`, `VITE_PAYMENT_PROVIDER`, `PAYOUT_PROVIDER` and `WASL_MODE` = `mock`. No Moyasar, Wasl or bank secrets at all. | owner | **STOP:** `npm run preflight -- --target staging --env-file .env.beta` is green locally, **and** a reviewer confirms that the GitHub `staging` environment and the Vercel Preview environment hold no production Supabase URL or key, and no Moyasar or Elm value |
 | S4 | Run Deploy → `staging`. Preflight passes, migrations 001–021 apply, then the **environment gate stops the run** (no marker yet). This is expected. | owner | **STOP:** confirm the run stopped at the gate, before any function deploy |
-| S5 | In the BETA SQL editor (as postgres): `select ops_guard.set_environment('beta', '<beta-ref>');` then `select ops_guard.allow_tester('9665…', 'name');` for each tester, then `select ops_guard.integrity_check();` (must return `ok: true`). | owner | **STOP:** paste the integrity result |
+| S5 | In the BETA SQL editor (as postgres): `select ops_guard.set_environment('beta', '<beta-ref>');`, then allowlist **every** account by the identity it signs in with, **before** creating it. Riders and captains (phone OTP): `select ops_guard.allow_tester('9665…', 'name');`. Staff (e-mail + password + TOTP): `select ops_guard.allow_tester('name@company', 'staff');`, then create the staff user and `select private.grant_admin(<id>, '<role>');`. Finally `select ops_guard.integrity_check();` must return `ok: true`. | owner | **STOP:** paste the allowlist (identities only) and the integrity result |
 | S6 | Dashboard → Auth → Hooks: Before User Created = `ops_guard.hook_before_user_created`; Custom Access Token = `ops_guard.hook_custom_access_token`. | owner | **STOP:** confirm both hooks are enabled |
 | S7 | Re-run Deploy → `staging`. The gate passes and the functions deploy. Run M1–M6. | owner + reviewer | **STOP:** M1–M6 results recorded; any failure means stop and roll back the functions |
 | S8 | Publish the BETA hosting build (Vercel Preview or a separate project), with an uptime monitor on `/health` (alert on two 503s in a row). | owner | **STOP:** monitor alert tested (M2) |
-| S9 | Invite allowlisted testers. Revoke with `select ops_guard.revoke_tester('9665…');` plus the Auth ban (Admin API). | owner | ongoing |
+| S9 | Invite allowlisted testers. To revoke: `select ops_guard.revoke_tester('9665…' or 'name@company');`. Read the result: if `sessions` or `refresh_tokens` is `failed:…`, the tester is blocked but sessions were **not** deleted, so the Auth ban (Admin API) is mandatory. Ban in every case. | owner | ongoing |
 
 **Rollback:** remove the BETA functions (or set them to refuse by un-setting the hooks or allowlist); the BETA project can be paused or deleted. Production is unaffected throughout.
+
+## 5a. When integrity fails or is stale (F6): what stops, what continues
+
+The money and Wasl paths stay fail-closed; nothing sensitive runs on a failed check.
+
+| | Integrity failed (recorded) | Integrity stale (> 3 min, scheduler stopped) |
+|---|---|---|
+| New ride requests (`request-ride`, **cash included**) | **stop** (503) | **stop** (503) |
+| Card payments, saved cards, tips, top-ups (`payments`) | **stop** | **stop** |
+| Capture / void / refund (`payments-worker`), webhooks | **stop**: retried by the next worker run | **stop**: same |
+| Wasl submissions (`wasl-worker`, `record_wasl_result`) | **stop**: queue kept | **stop**: queue kept |
+| Payout requests, batches, approvals | **stop** | continue in the DB (no Edge path); no money moves in BETA |
+| Trips already accepted (arrive, PIN, start, complete, chat, rating) | continue (database RPCs from the apps) | continue |
+| Privacy: erasure, export, retention | continue (§2a) | continue |
+| Sign-in, sign-up | unchanged (allowlist and hooks) | unchanged |
+
+- **Impact on riders:** a new ride request fails with the app's generic "couldn't send the request" error, cash rides included. Riders already on a trip finish it normally.
+- **Impact on captains:** no new offers. A trip in progress completes, and its cash fare and commission are posted. Card captures are delayed and happen automatically once the check is green.
+- **Recovery:** fix the cause. The next scheduled `integrity_check()` (≤ 1 minute) records `ok`, and every path above resumes on the next request or worker run. There is no restart and no manual reset. `failing_since` and `integrity_events` keep the outage start and end.
+- **Why cash rides also stop:** they create ledger entries and dispatch real captains, and the Edge guard cannot tell a cash request is harmless before routing and pricing. Stopping them is the deliberate fail-closed choice for a closed BETA.
+
+## 5b. Audit and history retention (F5)
+
+| Table | Content | Retention |
+|---|---|---|
+| `integrity_status` | last result, `failing_since` | single row |
+| `integrity_events` | one row per change of state or of the failure set | ≥ 365 days; monthly purge keeps 400 days (`purge_integrity_events`, which refuses < 365); recent rows cannot be deleted even by the owner |
+| `allowlist_log`, `revocation_log`, `guard_exemptions` | who was allowed or revoked and what happened, redactions in a degraded state | **never purged** (append-only, ALWAYS) |
 
 ## 6. Before production: what must happen first (not part of this PR)
 
@@ -137,7 +186,9 @@ Every step outside the repository needs **explicit human approval** first. Never
 | The marker digest is a tamper indicator, not a signature (md5 of public fields) | immutability triggers ALWAYS; no API role can reach the table | the owner can forge it; detection relies on mode/ref binding and integrity |
 | pg_cron unavailable or stopped | integrity goes stale → `/health` 503, workers refuse, live disallowed | BETA mock operations still run in the DB until a failure is recorded (staleness alone doesn't block DB writes) |
 | The Auth hooks are not configured (S6 skipped) | backup trigger on `auth.users`, GoTrue sign-ups disabled, integrity flags unlisted accounts | revocation then waits for JWT expiry plus the ban |
-| Revoked tester keeps a valid access token until it expires | `is_blocked` refuses sensitive RPCs at once; sessions and refresh tokens deleted | read access via RLS until JWT expiry (keep expiry short) |
+| Revoked tester keeps a valid access token until it expires | `is_blocked` refuses sensitive RPCs at once; sessions and refresh tokens deleted when permitted (reported per step) | read access via RLS until JWT expiry (keep expiry short); session deletion may fail on Supabase, so the ban is mandatory |
+| Redaction exemption (F1) could be used by the owner to soft-delete cards or null Wasl payloads in a degraded state | shape-restricted (no provider, amount or status change; no insert); logged in `guard_exemptions` | the owner can already do anything (see first row) |
+| Cash rides stop during an integrity outage (F6) | 1-minute schedule, `/health` alert, automatic recovery | short service interruption for new requests |
 | Moyasar test mode cannot be exercised in BETA (any non-mock payment is refused) | by design (strictest) | a separate reviewed change would be needed for a sandbox mode |
 | The `auth.users` trigger may not be ENABLE ALWAYS on Supabase | UNVERIFIED; integrity requires it enabled | under `replica`, the trigger could be skipped by the owner |
 | `request-ride` routing can still call Google | Google routing host allowlisted only while the guard passes | not a money or Elm path |
