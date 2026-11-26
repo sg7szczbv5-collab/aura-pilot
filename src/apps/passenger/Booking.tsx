@@ -32,6 +32,8 @@ import { CityMap, type MapMarker } from '../../map/CityMap'
 import { Badge, Button, cx, Divider, ErrorState, ICON, IconButton, Input, Money, Row, Segmented, Sheet, useToast } from '../../ds/ui'
 import { CarArt } from '../../ds/vehicle'
 import { useI18n } from '../../i18n/I18n'
+import { CITY_CENTER, GPS_PICKUP_ID, UNSET_PICKUP, validatePickup } from '../../location/riderLocation'
+import { PickupLocation, type PickupLocationProps } from './PickupLocation'
 import { DEMO_CURRENT, PLACES, haversineKm, nearestPlaceName, pinPlace, routeBetween } from '../../core/geo'
 import { VEHICLE_CLASSES, classById } from '../../core/pricing'
 import { actions, findPromo, quoteTrip, useEco, zoneAt } from '../../core/store'
@@ -63,19 +65,23 @@ function greeting(lang: 'ar' | 'en') {
 
 /* ============================== HOME ============================== */
 
-export function PassengerHome({ customer, onWhereTo, onQuick, onOpenInbox, inboxCount, onMenu, onSchedule }: { customer: Customer; onWhereTo: () => void; onQuick: (p: Place) => void; onOpenInbox: () => void; inboxCount: number; onMenu: () => void; onSchedule: () => void }) {
+export function PassengerHome({ customer, onWhereTo, onQuick, onOpenInbox, inboxCount, onMenu, onSchedule, pickup = DEMO_CURRENT, location, onPickupOnMap, onPickupSearch }: { customer: Customer; onWhereTo: () => void; onQuick: (p: Place) => void; onOpenInbox: () => void; inboxCount: number; onMenu: () => void; onSchedule: () => void; pickup?: Place; location?: PickupLocationProps['location']; onPickupOnMap?: () => void; onPickupSearch?: () => void }) {
   const { t, L, lang } = useI18n()
   const reservations = useEco((s) => s.reservations.filter((r) => r.passengerId === customer.id && r.status === 'scheduled' && r.at > Date.now()))
-  const cars = useNearbyCars(DEMO_CURRENT.pos, 6)
+  // The map, the "me" marker and the nearby cars follow the rider's real pickup; before one is set
+  // (LIVE) the map shows the city without a "me" marker.
+  const hasPickup = validatePickup(pickup, AUTH_MODE === 'supabase').ok
+  const center = hasPickup ? pickup.pos : CITY_CENTER
+  const cars = useNearbyCars(center, 6)
   const [tripType, setTripType] = useState<'ride' | 'schedule' | 'xl'>('ride')
   const markers: MapMarker[] = [
     ...cars.map((c) => ({ id: c.id, pos: c.pos, kind: 'car' as const, heading: c.heading })),
-    { id: 'me', pos: DEMO_CURRENT.pos, kind: 'me' as const },
+    ...(hasPickup ? [{ id: 'me', pos: pickup.pos, kind: 'me' as const }] : []),
   ]
   const first = L(customer.name).split(' ')[0]
   return (
     <div className="absolute inset-0">
-      <CityMap center={DEMO_CURRENT.pos} zoom={70} markers={markers} />
+      <CityMap center={center} zoom={70} markers={markers} />
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between px-4" style={{ paddingTop: 'calc(var(--safe-top) + 6px)' }}>
         <IconButton label={t('الإشعارات', 'Notifications')} onClick={onOpenInbox} className="pointer-events-auto relative">
           <Bell size={19} {...ICON} />
@@ -92,6 +98,7 @@ export function PassengerHome({ customer, onWhereTo, onQuick, onOpenInbox, inbox
 
       <div className="absolute inset-x-0 bottom-0 rounded-t-[28px] bg-white px-4 pt-2.5 pb-3 shadow-[0_-8px_30px_rgba(16,17,18,.08)]">
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-line-2" />
+        {location && onPickupOnMap && onPickupSearch && <PickupLocation pickup={pickup} location={location} onPickOnMap={onPickupOnMap} onSearch={onPickupSearch} />}
         <button onClick={tripType === 'schedule' ? onSchedule : onWhereTo} className="flex h-14 w-full items-center gap-3 rounded-2xl bg-road px-4 text-start transition active:scale-[0.99]">
           <Search size={20} {...ICON} />
           <span className="flex-1 font-display text-[17px] font-semibold">{t('إلى أين اليوم؟', 'Where to today?')}</span>
@@ -159,11 +166,14 @@ export function PassengerHome({ customer, onWhereTo, onQuick, onOpenInbox, inbox
 
 /* ============================== DESTINATION ============================== */
 
-export function DestinationScreen({ draft, customer, recent, onBack, onChoose, onPickOnMap, onEditPickup }: { draft: BookingDraft; customer: Customer; recent: Place[]; onBack: () => void; onChoose: (p: Place) => void; onPickOnMap: (target: 'pickup' | 'dropoff') => void; onEditPickup: (p: Place) => void }) {
+export function DestinationScreen({ draft, customer, recent, onBack, onChoose, onPickOnMap, onEditPickup, initialEditing = 'dropoff' }: { draft: BookingDraft; customer: Customer; recent: Place[]; onBack: () => void; onChoose: (p: Place) => void; onPickOnMap: (target: 'pickup' | 'dropoff') => void; onEditPickup: (p: Place) => void; initialEditing?: 'pickup' | 'dropoff' }) {
   const { t, L, lang } = useI18n()
   const [q, setQ] = useState('')
-  const [editing, setEditing] = useState<'pickup' | 'dropoff'>('dropoff')
-  const pickupLabel = draft.pickup.id === 'current' ? t('موقعك الحالي', 'Current location') : L(draft.pickup.name)
+  const [editing, setEditing] = useState<'pickup' | 'dropoff'>(initialEditing)
+  const pickupLabel =
+    draft.pickup.id === 'current' || draft.pickup.id === GPS_PICKUP_ID ? t('موقعك الحالي', 'Current location')
+    : draft.pickup.id === UNSET_PICKUP.id ? t('حدّد نقطة الالتقاء', 'Set your pickup')
+    : L(draft.pickup.name)
   const saved = useMemo(() => [...(customer.saved.home ? [customer.saved.home] : []), ...(customer.saved.work ? [customer.saved.work] : [])], [customer])
   const [results, setResults] = useState<Place[]>([])
   // Google Places when configured (debounced), curated places otherwise.
@@ -471,8 +481,11 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
   const q = quote.byClass[draft.classId]
   const walletShort = draft.payment === 'wallet' && customer.walletBalance < q.total
 
+  const pickupCheck = validatePickup(draft.pickup, AUTH_MODE === 'supabase')
   const confirm = () => {
     setError('')
+    // Never send a request without a usable pickup (unset, demo point in LIVE, bad coordinates).
+    if (!pickupCheck.ok) return setError(t('حدّد نقطة الالتقاء أولاً.', 'Set your pickup first.'))
     if (draft.scheduleAt) {
       actions.scheduleRide({ passengerId: customer.id, pickup: draft.pickup, dropoff: draft.dropoff!, vehicleClass: draft.classId, at: draft.scheduleAt })
       toast(t('تمت جدولة رحلتك', 'Your ride is scheduled'))
@@ -500,6 +513,7 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
               promo_invalid: t('رمز الخصم غير صالح.', 'Promo code is not valid.'),
               payment_failed: t('رُفضت عملية الدفع. جرّب بطاقة أخرى.', 'Payment was declined. Try another card.'),
               card_required: t('أضف بطاقة من المحفظة ← طرق الدفع، أو اختر نقداً.', 'Add a card in Wallet → Payment methods, or choose cash.'),
+              pickup_invalid: t('حدّد نقطة الالتقاء أولاً.', 'Set your pickup first.'),
               network: t('تعذّر إرسال الطلب، حاول مرة أخرى.', 'Could not send the request, try again.'),
             }[r.error],
           )
@@ -530,9 +544,11 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
             <span className="size-3 rounded-full border-[3px] border-ink" />
             <div className="min-w-0 flex-1">
               <p className="text-[11px] text-mute">{t('موقع الانطلاق', 'Pickup')}</p>
-              <p className="truncate text-sm font-semibold">{L(draft.pickup.name)}</p>
+              <p className={cx('truncate text-sm font-semibold', !pickupCheck.ok && 'text-amber-800')}>
+                {pickupCheck.ok ? L(draft.pickup.name) : t('حدّد نقطة الالتقاء', 'Set your pickup')}
+              </p>
             </div>
-            <span className="text-xs font-semibold text-mute underline">{t('تعديل', 'Edit')}</span>
+            <span className="text-xs font-semibold text-mute underline">{pickupCheck.ok ? t('تعديل', 'Edit') : t('تحديد', 'Set')}</span>
           </button>
           <Divider className="mx-3" />
           <div className="flex items-center gap-3 px-3 py-3">
@@ -616,7 +632,12 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
             )}
           </div>
         )}
-        <Button size="lg" full loading={busy || (!draft.scheduleAt && quote.loading)} disabled={walletShort || (!draft.scheduleAt && !quote.exact)} onClick={confirm}>
+        {!pickupCheck.ok && (
+          <p role="alert" className="mb-2 text-center text-[13px] font-medium text-amber-800" data-testid="pickup-required">
+            {t('حدّد نقطة الالتقاء قبل تأكيد الرحلة.', 'Set your pickup before confirming the ride.')}
+          </p>
+        )}
+        <Button size="lg" full loading={busy || (!draft.scheduleAt && quote.loading)} disabled={!pickupCheck.ok || walletShort || (!draft.scheduleAt && !quote.exact)} onClick={confirm}>
           {draft.scheduleAt ? t('تأكيد الجدولة', 'Confirm schedule') : t('تأكيد الرحلة', 'Confirm ride')}
         </Button>
       </div>

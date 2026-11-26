@@ -9,7 +9,9 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Home, History, Wallet, User } from 'lucide-react'
 import { ICON, Surface, ToastHost } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
-import { clearSession, getCustomer, getSession, setSession, useAllTrips, useEco } from '../../core/store'
+import { clearSession, getCustomer, getSession, setSession, useAllTrips, useEco, zoneAt } from '../../core/store'
+import { UNSET_PICKUP, mayApplyFix, pickupFromFix, validatePickup } from '../../location/riderLocation'
+import { useRiderLocation } from '../../location/useRiderLocation'
 import { DEMO_CURRENT } from '../../core/geo'
 import { isActive } from '../../core/trip'
 import type { Place, Trip } from '../../core/types'
@@ -35,7 +37,12 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
   const [pickTarget, setPickTarget] = useState<'pickup' | 'dropoff'>('dropoff')
   const [scheduleOpen, setScheduleOpen] = useState(false)
   const [inboxOpen, setInboxOpen] = useState(false)
-  const [draft, setDraft] = useState<BookingDraft>({ pickup: DEMO_CURRENT, classId: 'comfort', payment: 'mada' })
+  // LIVE: the pickup starts unset (GPS, a map pin or a search sets it); DEMO keeps the demo point.
+  const live = AUTH_MODE === 'supabase'
+  const [draft, setDraft] = useState<BookingDraft>({ pickup: live ? UNSET_PICKUP : DEMO_CURRENT, classId: 'comfort', payment: 'mada' })
+  const [destEditing, setDestEditing] = useState<'pickup' | 'dropoff'>('dropoff')
+  /** Where to go after the pickup pin is confirmed (when the rider had to set it mid-booking). */
+  const [pickReturn, setPickReturn] = useState<Step | null>(null)
   const [dismissed, setDismissed] = useState<string[]>(() => {
     try {
       return JSON.parse(sessionStorage.getItem(DISMISS_KEY) ?? '[]')
@@ -47,6 +54,22 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
 
   useEco((s) => s.rev) // re-render on any store change
   const customer = getCustomer(pid)
+  const loc = useRiderLocation(stage === 'main' && !!customer)
+  // Apply a GPS fix to the pickup. An automatic fix never replaces a pickup the rider chose by hand;
+  // an explicit "Use my location" tap does. In the demo build a
+  // fix outside the demo service area is ignored (the demo city stays usable from anywhere).
+  useEffect(() => {
+    const pos = loc.state.status === 'located' ? loc.state.pos : undefined
+    if (!pos || (!live && !zoneAt(pos).inService)) return
+    setDraft((d) => (mayApplyFix(d.pickup, live, loc.state.byUser) ? { ...d, pickup: pickupFromFix(pos, loc.state.accuracyM) } : d))
+  }, [loc.state, live])
+  const pickupOk = validatePickup(draft.pickup, live).ok
+  /** The rider must set a pickup first: open the pin screen, then continue to `next`. */
+  const askPickup = (next: Step) => {
+    setPickTarget('pickup')
+    setPickReturn(next)
+    setStep('pick')
+  }
   const all = useAllTrips()
   const inboxCount = useEco((s) => (AUTH_MODE === 'supabase' ? 0 : s.inbox.filter((i) => (i.to === 'all' || i.to === 'passengers') && i.at > seen).length))
 
@@ -140,6 +163,8 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
 
   const startBooking = (dropoff?: Place, scheduleAt?: number) => {
     setDraft((d) => ({ ...d, dropoff, scheduleAt, classId: d.classId }))
+    setDestEditing('dropoff')
+    if (dropoff && !pickupOk) return askPickup('vehicles')
     setStep(dropoff ? 'vehicles' : 'destination')
   }
 
@@ -167,8 +192,10 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
         customer={customer}
         recent={recent}
         onBack={() => setStep(null)}
+        initialEditing={destEditing}
         onChoose={(p) => {
           setDraft((d) => ({ ...d, dropoff: p }))
+          if (!pickupOk) return askPickup('vehicles')
           setStep('vehicles')
         }}
         onEditPickup={(p) => setDraft((d) => ({ ...d, pickup: p }))}
@@ -183,11 +210,15 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
       <MapPickScreen
         target={pickTarget}
         start={pickTarget === 'pickup' ? draft.pickup : (draft.dropoff ?? draft.pickup)}
-        onBack={() => setStep(draft.dropoff && pickTarget === 'pickup' ? 'confirm' : 'destination')}
+        onBack={() => {
+          setPickReturn(null)
+          setStep(draft.dropoff && pickTarget === 'pickup' ? 'confirm' : 'destination')
+        }}
         onConfirm={(p) => {
           if (pickTarget === 'pickup') {
             setDraft((d) => ({ ...d, pickup: p }))
-            setStep(draft.dropoff ? 'confirm' : 'destination')
+            setStep(pickReturn ?? (draft.dropoff ? 'confirm' : 'destination'))
+            setPickReturn(null)
           } else {
             setDraft((d) => ({ ...d, dropoff: p }))
             setStep('vehicles')
@@ -226,6 +257,13 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
                   inboxCount={inboxCount}
                   onMenu={() => setTab('account')}
                   onSchedule={() => setScheduleOpen(true)}
+                  pickup={draft.pickup}
+                  location={loc}
+                  onPickupOnMap={() => askPickup('destination')}
+                  onPickupSearch={() => {
+                    setDestEditing('pickup')
+                    setStep('destination')
+                  }}
                 />
               )}
               {tab === 'trips' && <TripsTab customer={customer} />}

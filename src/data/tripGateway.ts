@@ -10,6 +10,7 @@ import { getSupabase } from '../auth/supabaseClient'
 import { actions, store, type TripRequest } from '../core/store'
 import type { Actor, Place, TripRating, VehicleClassId } from '../core/types'
 import { refreshRide, syncDriverSelf } from './serverMirror'
+import { validatePickup } from '../location/riderLocation'
 
 export type RequestError =
   | 'restricted'
@@ -21,6 +22,7 @@ export type RequestError =
   | 'promo_invalid'
   | 'payment_failed'
   | 'card_required'
+  | 'pickup_invalid'
   | 'network'
 /** transactionUrl: open it for 3-D Secure; the app returns with ?payment=<id>. */
 export type RequestResult = { ok: true; tripId: string; transactionUrl?: string } | { ok: false; error: RequestError; message?: string }
@@ -140,9 +142,12 @@ async function rpcOk(fn: string, args: Record<string, unknown>): Promise<boolean
   return !error
 }
 
-const serverGateway: TripGateway = {
+/** Exported for tests; screens use `trips`. */
+export const serverGateway: TripGateway = {
   mode: 'supabase',
   async requestTrip(req) {
+    // Defence in depth: the confirm screen already blocks this; no request leaves without a real pickup.
+    if (!validatePickup(req.pickup, true).ok) return { ok: false, error: 'pickup_invalid' }
     if ((req.payment === 'mada' || req.payment === 'apple_pay') && !req.paymentMethodId) return { ok: false, error: 'card_required' }
     const { data, error } = await invokeFunction<{ rideId: string; transactionUrl?: string }>('request-ride', rideRequestBody({ ...req, cityId: req.cityId }))
     if (error || !data?.rideId) return { ok: false, error: requestErrorFrom(error ?? ''), message: error }
