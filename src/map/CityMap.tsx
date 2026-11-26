@@ -1,6 +1,8 @@
 import { useEffect, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
+import { MAPS_PROVIDER } from '../maps/config';
+import { GoogleCityMap } from '../maps/GoogleCityMap';
 
 export interface LatLng {
   lat: number;
@@ -218,7 +220,7 @@ function extractRoutePoints(input: RouteInput): LatLng[] {
   return [];
 }
 
-export function CityMap({
+function MapboxCityMap({
   center = DEFAULT_CENTER,
   zoom = 11.5,
   markers = [],
@@ -432,6 +434,16 @@ export function CityMap({
       {children}
     </div>
   );
+}
+
+/**
+ * Provider switch: Google Maps when configured (VITE_MAPS_PROVIDER=google and
+ * VITE_GOOGLE_MAPS_API_KEY, see src/maps/config.ts), otherwise Mapbox. If Google
+ * fails to load (bad key, blocked API, offline) the Mapbox map is shown instead.
+ */
+export function CityMap(props: CityMapProps) {
+  if (MAPS_PROVIDER === 'google') return <GoogleCityMap {...props} fallback={<MapboxCityMap {...props} />} />;
+  return <MapboxCityMap {...props} />;
 }
 
 export default CityMap;
