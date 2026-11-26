@@ -2,6 +2,15 @@ import { GOOGLE_MAPS_KEY } from './config'
 
 let loading: Promise<typeof google> | null = null
 
+/** Google calls window.gm_authFailure when the key is invalid / not allowed for this site. */
+let authFailed = false
+const authListeners = new Set<() => void>()
+export function onGoogleAuthFailure(cb: () => void): () => void {
+  if (authFailed) cb()
+  authListeners.add(cb)
+  return () => authListeners.delete(cb)
+}
+
 /**
  * Loads the Google Maps JavaScript API once (marker, places and geocoding libraries).
  * The browser key must be restricted to your domains (HTTP referrers) and to the
@@ -13,6 +22,10 @@ export function loadGoogleMaps(lang: 'ar' | 'en' = 'ar'): Promise<typeof google>
   if (w.google?.maps?.Map) return Promise.resolve(w.google)
   if (!loading) {
     loading = new Promise((resolve, reject) => {
+      ;(w as Window & { gm_authFailure?: () => void }).gm_authFailure = () => {
+        authFailed = true
+        authListeners.forEach((f) => f())
+      }
       w.__auraGmapsReady = () => (w.google ? resolve(w.google) : reject(new Error('google_maps_missing')))
       const s = document.createElement('script')
       const q = new URLSearchParams({

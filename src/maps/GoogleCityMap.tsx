@@ -8,7 +8,7 @@ import type { LatLng } from '../core/types'
 import type { CityMapProps, MapMarker, MapRoute, MapZone } from '../map/CityMap'
 import { useI18n } from '../i18n/I18n'
 import { GOOGLE_MAP_ID, pxPerKmToGoogleZoom } from './config'
-import { loadGoogleMaps } from './googleLoader'
+import { loadGoogleMaps, onGoogleAuthFailure } from './googleLoader'
 
 const INK = '#101112'
 const GO = '#78B83F'
@@ -126,139 +126,171 @@ export function GoogleCityMap(props: CityMapProps & { fallback?: ReactNode }) {
         setReady(true)
       })
       .catch(() => !dead && setFailed(true))
+    const off = onGoogleAuthFailure(() => !dead && setFailed(true))
     return () => {
       dead = true
+      off()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Follow an explicit center / zoom from the screen.
   useEffect(() => {
-    const map = mapRef.current
-    if (!ready || !map || !center) return
-    map.panTo(center)
+    try {
+      const map = mapRef.current
+      if (!ready || !map || !center) return
+      map.panTo(center)
+    } catch (e) {
+      console.warn("Google map error, using the fallback map", e)
+      setFailed(true)
+    }
   }, [ready, center?.lat, center?.lng]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    const map = mapRef.current
-    if (!ready || !map) return
-    const c = map.getCenter()
-    const z = pxPerKmToGoogleZoom(zoom, c?.lat() ?? RIYADH.lat)
-    if (Math.abs((map.getZoom() ?? z) - z) > 0.3) map.setZoom(z)
+    try {
+      const map = mapRef.current
+      if (!ready || !map) return
+      const c = map.getCenter()
+      const z = pxPerKmToGoogleZoom(zoom, c?.lat() ?? RIYADH.lat)
+      if (Math.abs((map.getZoom() ?? z) - z) > 0.3) map.setZoom(z)
+    } catch (e) {
+      console.warn("Google map error, using the fallback map", e)
+      setFailed(true)
+    }
   }, [ready, zoom])
 
   // Fit to points (trip overview) when the key changes.
   useEffect(() => {
-    const map = mapRef.current
-    const g = gRef.current
-    if (!ready || !map || !g || !fitPoints.length) return
-    if (fitPoints.length === 1) {
-      map.panTo(fitPoints[0])
-      return
+    try {
+      const map = mapRef.current
+      const g = gRef.current
+      if (!ready || !map || !g || !fitPoints.length) return
+      if (fitPoints.length === 1) {
+        map.panTo(fitPoints[0])
+        return
+      }
+      const [top, right, bottom, left] = toPaddingTuple(padding)
+      const b = new g.maps.LatLngBounds()
+      fitPoints.forEach((p) => b.extend(p))
+      map.fitBounds(b, { top, right, bottom, left })
+    } catch (e) {
+      console.warn("Google map error, using the fallback map", e)
+      setFailed(true)
     }
-    const [top, right, bottom, left] = toPaddingTuple(padding)
-    const b = new g.maps.LatLngBounds()
-    fitPoints.forEach((p) => b.extend(p))
-    map.fitBounds(b, { top, right, bottom, left })
   }, [ready, fitKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Markers (reconciled by id).
   useEffect(() => {
-    const map = mapRef.current
-    const g = gRef.current
-    if (!ready || !map || !g) return
-    const live = new Set<string>()
-    for (const m of markers) {
-      live.add(m.id)
-      let obj = markerObjs.current.get(m.id)
-      if (!obj) {
-        obj = new g.maps.marker.AdvancedMarkerElement({ map, position: m.pos, content: markerElement(m, dark), zIndex: m.kind === 'car' ? 1 : 10 })
-        markerObjs.current.set(m.id, obj)
-      } else {
-        obj.position = m.pos
-        obj.content = markerElement(m, dark)
+    try {
+      const map = mapRef.current
+      const g = gRef.current
+      if (!ready || !map || !g) return
+      const live = new Set<string>()
+      for (const m of markers) {
+        live.add(m.id)
+        let obj = markerObjs.current.get(m.id)
+        if (!obj) {
+          obj = new g.maps.marker.AdvancedMarkerElement({ map, position: m.pos, content: markerElement(m, dark), zIndex: m.kind === 'car' ? 1 : 10 })
+          markerObjs.current.set(m.id, obj)
+        } else {
+          obj.position = m.pos
+          obj.content = markerElement(m, dark)
+        }
+        const click = m.onClick
+        obj.gmpClickable = !!click
+        ;(obj as unknown as { __aura?: () => void }).__aura?.()
+        if (click) {
+          const l = obj.addListener('gmp-click', click)
+          ;(obj as unknown as { __aura?: () => void }).__aura = () => l.remove()
+        }
       }
-      const click = m.onClick
-      obj.gmpClickable = !!click
-      ;(obj as unknown as { __aura?: () => void }).__aura?.()
-      if (click) {
-        const l = obj.addListener('gmp-click', click)
-        ;(obj as unknown as { __aura?: () => void }).__aura = () => l.remove()
+      for (const [id, obj] of markerObjs.current) {
+        if (!live.has(id)) {
+          obj.map = null
+          markerObjs.current.delete(id)
+        }
       }
-    }
-    for (const [id, obj] of markerObjs.current) {
-      if (!live.has(id)) {
-        obj.map = null
-        markerObjs.current.delete(id)
-      }
+    } catch (e) {
+      console.warn("Google map error, using the fallback map", e)
+      setFailed(true)
     }
   }, [ready, markers, dark])
 
   // Routes.
   useEffect(() => {
-    const map = mapRef.current
-    const g = gRef.current
-    if (!ready || !map || !g) return
-    const live = new Set<string>()
-    routes.forEach((item, idx) => {
-      const r: MapRoute = Array.isArray(item) ? { id: `route-${idx}`, pts: item } : item
-      const routeId = r.id ?? `route-${idx}`
-      const routePath = r.pts ?? r.path ?? []
-      live.add(routeId)
-      const color = r.color ?? (r.tone === 'go' ? GO : r.tone === 'mute' ? MUTE : dark ? '#ffffff' : INK)
-      const opts: google.maps.PolylineOptions = {
-        map,
-        path: routePath,
-        strokeColor: color,
-        strokeOpacity: r.dashed ? 0 : 0.95,
-        strokeWeight: r.width ?? 5,
-        icons: r.dashed ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, strokeColor: color, scale: 3 }, offset: '0', repeat: '14px' }] : undefined,
+    try {
+      const map = mapRef.current
+      const g = gRef.current
+      if (!ready || !map || !g) return
+      const live = new Set<string>()
+      routes.forEach((item, idx) => {
+        const r: MapRoute = Array.isArray(item) ? { id: `route-${idx}`, pts: item } : item
+        const routeId = r.id ?? `route-${idx}`
+        const routePath = r.pts ?? r.path ?? []
+        live.add(routeId)
+        const color = r.color ?? (r.tone === 'go' ? GO : r.tone === 'mute' ? MUTE : dark ? '#ffffff' : INK)
+        const opts: google.maps.PolylineOptions = {
+          map,
+          path: routePath,
+          strokeColor: color,
+          strokeOpacity: r.dashed ? 0 : 0.95,
+          strokeWeight: r.width ?? 5,
+          icons: r.dashed ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, strokeColor: color, scale: 3 }, offset: '0', repeat: '14px' }] : undefined,
+        }
+        const obj = lineObjs.current.get(routeId)
+        if (obj) obj.setOptions(opts)
+        else lineObjs.current.set(routeId, new g.maps.Polyline(opts))
+      })
+      for (const [id, obj] of lineObjs.current) {
+        if (!live.has(id)) {
+          obj.setMap(null)
+          lineObjs.current.delete(id)
+        }
       }
-      const obj = lineObjs.current.get(routeId)
-      if (obj) obj.setOptions(opts)
-      else lineObjs.current.set(routeId, new g.maps.Polyline(opts))
-    })
-    for (const [id, obj] of lineObjs.current) {
-      if (!live.has(id)) {
-        obj.setMap(null)
-        lineObjs.current.delete(id)
-      }
+    } catch (e) {
+      console.warn("Google map error, using the fallback map", e)
+      setFailed(true)
     }
   }, [ready, routes, dark])
 
   // Zones.
   useEffect(() => {
-    const map = mapRef.current
-    const g = gRef.current
-    if (!ready || !map || !g) return
-    const live = new Set<string>()
-    zones.forEach((z: MapZone, idx) => {
-      const zoneId = z.id ?? `zone-${idx}`
-      live.add(zoneId)
-      const color = z.kind === 'restricted' ? '#d64545' : z.kind === 'high_demand' ? GO : z.kind === 'airport' ? '#3f6fd6' : MUTE
-      const opts: google.maps.CircleOptions = {
-        map,
-        center: z.center,
-        radius: z.radiusKm * 1000,
-        strokeColor: color,
-        strokeWeight: z.selected ? 3 : 1.5,
-        fillColor: color,
-        fillOpacity: z.active === false ? 0.04 : 0.12,
-        clickable: !!z.onClick,
+    try {
+      const map = mapRef.current
+      const g = gRef.current
+      if (!ready || !map || !g) return
+      const live = new Set<string>()
+      zones.forEach((z: MapZone, idx) => {
+        const zoneId = z.id ?? `zone-${idx}`
+        live.add(zoneId)
+        const color = z.kind === 'restricted' ? '#d64545' : z.kind === 'high_demand' ? GO : z.kind === 'airport' ? '#3f6fd6' : MUTE
+        const opts: google.maps.CircleOptions = {
+          map,
+          center: z.center,
+          radius: z.radiusKm * 1000,
+          strokeColor: color,
+          strokeWeight: z.selected ? 3 : 1.5,
+          fillColor: color,
+          fillOpacity: z.active === false ? 0.04 : 0.12,
+          clickable: !!z.onClick,
+        }
+        let obj = zoneObjs.current.get(zoneId)
+        if (obj) obj.setOptions(opts)
+        else {
+          obj = new g.maps.Circle(opts)
+          zoneObjs.current.set(zoneId, obj)
+        }
+        g.maps.event.clearListeners(obj, 'click')
+        if (z.onClick) obj.addListener('click', z.onClick)
+      })
+      for (const [id, obj] of zoneObjs.current) {
+        if (!live.has(id)) {
+          obj.setMap(null)
+          zoneObjs.current.delete(id)
+        }
       }
-      let obj = zoneObjs.current.get(zoneId)
-      if (obj) obj.setOptions(opts)
-      else {
-        obj = new g.maps.Circle(opts)
-        zoneObjs.current.set(zoneId, obj)
-      }
-      g.maps.event.clearListeners(obj, 'click')
-      if (z.onClick) obj.addListener('click', z.onClick)
-    })
-    for (const [id, obj] of zoneObjs.current) {
-      if (!live.has(id)) {
-        obj.setMap(null)
-        zoneObjs.current.delete(id)
-      }
+    } catch (e) {
+      console.warn("Google map error, using the fallback map", e)
+      setFailed(true)
     }
   }, [ready, zones])
 

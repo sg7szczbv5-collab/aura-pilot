@@ -1,8 +1,9 @@
-import { useEffect, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { MAPS_PROVIDER } from '../maps/config';
 import { GoogleCityMap } from '../maps/GoogleCityMap';
+import { VectorCityMap, type VectorCityMapProps, type VectorRoute, type VectorZone } from './VectorCityMap';
 
 export interface LatLng {
   lat: number;
@@ -249,6 +250,8 @@ function MapboxCityMap({
 
   const token = getMapboxToken();
   const safeZoom = normalizeMapboxZoom(zoom);
+  /** Token rejected / style not loadable → show the fallback map instead of a blank one. */
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || !token || mapRef.current) return;
@@ -274,6 +277,11 @@ function MapboxCityMap({
         'top-right'
       );
     }
+
+    map.on('error', (e) => {
+      const status = (e?.error as { status?: number } | undefined)?.status;
+      if (status === 401 || status === 403) setFailed(true);
+    });
 
     map.on('click', (e) => {
       onPickRef.current?.({ lat: e.lngLat.lat, lng: e.lngLat.lng });
@@ -414,6 +422,8 @@ function MapboxCityMap({
     }
   }, [route, routes]);
 
+  if ((!token || failed) && fallback) return <>{fallback}</>;
+
   if (!token) {
     return (
       <div
@@ -436,14 +446,66 @@ function MapboxCityMap({
   );
 }
 
+const VECTOR_TONES = ['go', 'ink', 'mute'] as const;
+
+/** Current CityMap props → the offline vector map's props. */
+function toVectorProps(p: CityMapProps): VectorCityMapProps {
+  const routes: VectorRoute[] = [
+    ...(p.route?.length ? [{ id: 'route', pts: p.route }] : []),
+    ...(p.routes ?? []).map((r, i): VectorRoute =>
+      Array.isArray(r)
+        ? { id: `r${i}`, pts: r }
+        : {
+            id: r.id ?? `r${i}`,
+            pts: r.pts ?? r.path ?? [],
+            tone: VECTOR_TONES.includes(r.tone as (typeof VECTOR_TONES)[number]) ? (r.tone as VectorRoute['tone']) : 'go',
+            dashed: r.dashed,
+            width: r.width,
+          },
+    ),
+  ];
+  const pad = p.padding;
+  const padding: [number, number, number, number] | undefined =
+    typeof pad === 'number'
+      ? [pad, pad, pad, pad]
+      : Array.isArray(pad)
+        ? pad
+        : pad
+          ? [pad.top ?? 80, pad.right ?? 40, pad.bottom ?? 120, pad.left ?? 40]
+          : undefined;
+  return {
+    theme: p.theme === 'dark' ? 'dark' : 'light',
+    markers: p.markers,
+    routes,
+    zones: p.zones?.map((z, i) => ({ ...z, id: z.id ?? `z${i}`, kind: (z.kind ?? 'service') as VectorZone['kind'] })),
+    heat: p.heat,
+    fit: Array.isArray(p.fit) ? p.fit : undefined,
+    fitKey: p.fitKey == null ? undefined : String(p.fitKey),
+    padding,
+    center: p.center,
+    zoom: p.zoom,
+    interactive: p.interactive,
+    controls: p.controls,
+    labels: p.labels,
+    onPick: p.onPick as ((pos: LatLng) => void) | undefined,
+    onCenterChange: p.onCenterChange as ((c: LatLng) => void) | undefined,
+    className: p.className,
+    children: p.children,
+  };
+}
+
 /**
- * Provider switch: Google Maps when configured (VITE_MAPS_PROVIDER=google and
- * VITE_GOOGLE_MAPS_API_KEY, see src/maps/config.ts), otherwise Mapbox. If Google
- * fails to load (bad key, blocked API, offline) the Mapbox map is shown instead.
+ * Provider switch, with a map always on screen:
+ *   Google Maps — VITE_MAPS_PROVIDER=google + VITE_GOOGLE_MAPS_API_KEY (src/maps/config.ts)
+ *   Mapbox      — VITE_MAPBOX_ACCESS_TOKEN or NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
+ *   offline     — the built-in vector map of Riyadh (no key needed)
+ * Each one falls back to the next if it is not configured or fails to load.
  */
 export function CityMap(props: CityMapProps) {
-  if (MAPS_PROVIDER === 'google') return <GoogleCityMap {...props} fallback={<MapboxCityMap {...props} />} />;
-  return <MapboxCityMap {...props} />;
+  const offline = <VectorCityMap {...toVectorProps(props)} />;
+  const mapbox = getMapboxToken() ? <MapboxCityMap {...props} fallback={offline} /> : offline;
+  if (MAPS_PROVIDER === 'google') return <GoogleCityMap {...props} fallback={mapbox} />;
+  return mapbox;
 }
 
 export default CityMap;
