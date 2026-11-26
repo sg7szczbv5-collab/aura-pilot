@@ -1446,3 +1446,49 @@ describe('BETA: concurrency, isolation and failure cases', () => {
     await one(riderY, `select transition_ride($1, 'cancelled', 'cleanup')`, [r2])
   })
 })
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('PDPL for in-trip chat (migration 019): export and erasure cover ride_messages', () => {
+  let riderZ: string, capZ: string, rideZ: string
+  type Exported = { ride_messages: { ride_number: number; sender: string; body: string }[] }
+
+  beforeAll(async () => {
+    capZ = await makeCaptain('966547000001', 'Privacy Captain Z', 'go', 24.6605, 46.7105)
+    riderZ = await newUser('966547100001', 'Privacy Rider Z')
+    await acceptRequiredConsents(riderZ, 'rider')
+    rideZ = (await one<{ id: string }>('service',
+      `select id from create_ride($1, 'riyadh', 'go', 24.66, 46.71, 'Privacy pickup', 24.70, 46.69, 'Privacy drop', 5000, 700, 'cash')`, [riderZ])).id
+    expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [rideZ])).d).toBe(capZ)
+    await one(capZ, `select accept_ride($1)`, [rideZ])
+    await as(riderZ, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'رقمي الخاص 0550000000، اتصل بي')`, [rideZ]))
+    await as(capZ, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'أنا عند البوابة الشمالية')`, [rideZ]))
+  })
+
+  it('export_my_data includes the messages the user sent — and only those', async () => {
+    const { d } = await one<{ d: Exported & { format: string } }>(riderZ, `select export_my_data() as d`)
+    expect(d.format).toBe('aura.personal-data.v2')
+    expect(d.ride_messages).toEqual([expect.objectContaining({ sender: 'rider', body: 'رقمي الخاص 0550000000، اتصل بي' })])
+    const cap = (await one<{ d: Exported }>(capZ, `select export_my_data() as d`)).d
+    expect(cap.ride_messages.map((m) => m.body)).toEqual(['أنا عند البوابة الشمالية']) // not the rider's text
+    const other = (await one<{ d: Exported }>(riderB, `select export_my_data() as d`)).d
+    expect(other.ride_messages.some((m) => m.body.includes('0550000000'))).toBe(false)
+  })
+
+  it('erasure is still refused during an active ride and cannot be called by users', async () => {
+    await expect(one('service', `select private.erase_user($1)`, [riderZ])).rejects.toThrow(/active ride/)
+    await expect(one(riderZ, `select private.erase_user($1)`, [riderZ])).rejects.toThrow(/permission denied/)
+  })
+
+  it('erase_user replaces the text the user sent; the other party’s messages are untouched', async () => {
+    await one(riderZ, `select transition_ride($1, 'cancelled', 'privacy test')`, [rideZ])
+    await one('service', `select private.erase_user($1)`, [riderZ])
+    const msgs = await rows<{ sender_kind: string; body: string; sender_id: string }>('service',
+      `select sender_kind, body, sender_id from ride_messages where ride_id = $1 order by created_at, sender_kind desc`, [rideZ])
+    expect(msgs).toEqual([
+      { sender_kind: 'rider', body: '[erased]', sender_id: riderZ },
+      { sender_kind: 'driver', body: 'أنا عند البوابة الشمالية', sender_id: capZ },
+    ])
+    expect((await one<{ n: number }>('service', `select count(*)::int as n from ride_messages where body like '%0550000000%'`)).n).toBe(0)
+  })
+})
+
