@@ -1356,3 +1356,82 @@ describe('captain resubmission: driver_save_vehicle + re-upload + submit (migrat
     expect(d).toEqual({ status: 'pending_review', status_reason: null, current_vehicle_id: v2.id })
   })
 })
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('BETA: concurrency, isolation and failure cases', () => {
+  let capA: string, capB: string, riderX: string, riderY: string, ride: string
+  const PICK: [number, number] = [24.69, 46.72]
+  const request = (rider: string) =>
+    one<{ id: string }>('service', `select id from create_ride($1, 'riyadh', 'go', $2, $3, 'Beta pickup', 24.72, 46.70, 'Beta drop', 5000, 700, 'cash')`, [rider, PICK[0], PICK[1]])
+
+  beforeAll(async () => {
+    capA = await makeCaptain('966545000001', 'Beta Captain A', 'go', 24.6905, 46.7205)
+    capB = await makeCaptain('966545000002', 'Beta Captain B', 'go', 24.70, 46.73)
+    riderX = await newUser('966545100001', 'Beta Rider X')
+    riderY = await newUser('966545100002', 'Beta Rider Y')
+    await acceptRequiredConsents(riderX, 'rider')
+    await acceptRequiredConsents(riderY, 'rider')
+  })
+
+  it('a duplicate request while a ride is active is refused (one active ride per rider)', async () => {
+    ride = (await request(riderX)).id
+    await expect(request(riderX)).rejects.toThrow(/rides_one_active_per_rider/) // enforced by a unique index
+  })
+
+  it('only the offered captain can accept, exactly once — never two captains on one ride', async () => {
+    expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [ride])).d).toBe(capA)
+    await expect(one(capB, `select accept_ride($1)`, [ride])).rejects.toThrow(/no longer available/)
+    expect((await one<{ status: string }>(capA, `select (accept_ride($1)).status`, [ride])).status).toBe('driver_assigned')
+    await expect(one(capA, `select accept_ride($1)`, [ride])).rejects.toThrow(/no longer available/)
+    await expect(one(capB, `select accept_ride($1)`, [ride])).rejects.toThrow(/no longer available/)
+    const r = await one<{ driver_id: string; status: string }>('service', `select driver_id, status from rides where id = $1`, [ride])
+    expect(r).toEqual({ driver_id: capA, status: 'driver_assigned' })
+  })
+
+  it('another rider and another captain see nothing of this ride, its log, route, chat or money', async () => {
+    for (const who of [riderY, capB]) {
+      expect(await rows(who, `select id from rides where id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select id from ride_events where ride_id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select ride_id from ride_route_points where ride_id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select id from ride_messages where ride_id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select id from payments where ride_id = $1`, [ride])).toEqual([])
+      await expect(one(who, `select ride_view($1)`, [ride])).rejects.toThrow()
+      await expect(one(who, `select transition_ride($1, 'cancelled', 'x')`, [ride])).rejects.toThrow(/not allowed/)
+    }
+    // Wallets / ledgers / payouts are private to their owner.
+    const xs = await rows<{ owner_id: string }>(riderY, `select owner_id from wallet_accounts`)
+    expect(xs.every((w) => w.owner_id === riderY)).toBe(true)
+    expect(await rows(capB, `select id from payouts where driver_id = $1`, [capA])).toEqual([])
+    expect((await rows<{ id: string }>(riderY, `select id from profiles`)).map((p) => p.id)).toEqual([riderY])
+  })
+
+  it('illegal transitions are refused (rider cannot start/complete; captain cannot skip states)', async () => {
+    await expect(one(riderX, `select transition_ride($1, 'in_progress')`, [ride])).rejects.toThrow()
+    await expect(one(riderX, `select transition_ride($1, 'completed')`, [ride])).rejects.toThrow()
+    await expect(one(capA, `select transition_ride($1, 'completed')`, [ride])).rejects.toThrow(/illegal ride transition/)
+    await expect(one(capA, `select start_ride($1, '0000')`, [ride])).rejects.toThrow(/arrived first/) // cannot start before arriving
+    expect((await one<{ status: string }>('service', `select status from rides where id = $1`, [ride])).status).toBe('driver_assigned')
+  })
+
+  it('a cancelled ride cannot be revived, completed or settled; the rider can request again', async () => {
+    await one(riderX, `select transition_ride($1, 'cancelled', 'Changed plans')`, [ride])
+    await expect(one(capA, `select transition_ride($1, 'driver_arriving')`, [ride])).rejects.toThrow()
+    await expect(one(capA, `select transition_ride($1, 'completed')`, [ride])).rejects.toThrow()
+    const ev = await rows<{ to_status: string; actor: string }>(riderX, `select to_status, actor from ride_events where ride_id = $1 order by created_at`, [ride])
+    expect(ev.at(-1)).toEqual({ to_status: 'cancelled', actor: 'rider' })
+    const again = await request(riderX)
+    expect(again.id).not.toBe(ride)
+    await one(riderX, `select transition_ride($1, 'cancelled', 'cleanup')`, [again.id])
+  })
+
+  it('a late accept after the offer expired is refused and the ride is offered again', async () => {
+    const r2 = (await request(riderY)).id
+    expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [r2])).d).toBe(capA)
+    await db.query(`update rides set offer_expires_at = now() - interval '1 second' where id = $1`, [r2])
+    await expect(one(capA, `select accept_ride($1)`, [r2])).rejects.toThrow(/no longer available/)
+    await one('service', `select expire_ride_offers()`)
+    const next = await one<{ d: string | null }>('service', `select dispatch_ride($1) as d`, [r2])
+    expect(next.d).toBe(capB) // capA timed out on this ride and is not offered it again
+    await one(riderY, `select transition_ride($1, 'cancelled', 'cleanup')`, [r2])
+  })
+})
