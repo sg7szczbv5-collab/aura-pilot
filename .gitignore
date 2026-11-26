@@ -10,3 +10,7 @@ indx-1/
 search-results.txt
 preflight-report.txt
 preflight.json
+
+# Supabase CLI local state (project ref, pooler URL) — never commit
+supabase/.temp/
+supabase/.branches/
