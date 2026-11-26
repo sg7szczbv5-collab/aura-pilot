@@ -32,12 +32,15 @@ import { formatSar } from '../../money/halalas'
 import { Avatar, Badge, Button, Card, cx, Divider, EmptyState, Field, ICON, Input, Money, Row, Segmented, Sheet, Switch, TripStatusBadge, useToast, Select } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
 import { actions, getDriver, useAllTrips, useEco } from '../../core/store'
+import { openTicket, replyToTicket, useMyTickets } from '../../data/supportGateway'
 import { classById } from '../../core/pricing'
 import { dateTime, day, sar, clock } from '../../core/format'
 import { PLACES } from '../../core/geo'
 import type { Customer, Ticket, Trip } from '../../core/types'
 import { Panel, TopBar } from '../shared/mobile'
 import { PAYMENT_LABEL } from './Booking'
+import { AUTH_MODE } from '../../auth/config'
+import { getSupabase } from '../../auth/supabaseClient'
 
 /* ============================== MY TRIPS ============================== */
 
@@ -194,8 +197,9 @@ function TripDetail({ trip, customerId, onDone }: { trip: Trip; customerId: stri
         full
         className="mt-4"
         icon={<HelpCircle size={17} />}
-        onClick={() => {
-          actions.createTicket({ requester: { kind: 'customer', id: customerId }, subject: `Issue with trip ${trip.id}`, category: 'complaint', tripId: trip.id, text: 'Rider reported an issue from trip history.' })
+        onClick={async () => {
+          const r = await openTicket({ requester: { kind: 'customer', id: customerId }, subject: `Issue with trip ${trip.id.slice(0, 8)}`, category: 'complaint', tripId: trip.id, text: 'Rider reported an issue from trip history.' })
+          if (!r.ok) return toast(t('تعذّر فتح التذكرة، حاول مرة أخرى.', 'Could not open the ticket, try again.'), 'error')
           toast(t('تم فتح تذكرة دعم', 'Support ticket opened'))
           onDone()
         }}
@@ -212,7 +216,7 @@ export function WalletTab({ customer }: { customer: Customer }) {
   const { t, L, lang } = useI18n()
   const toast = useToast()
   const all = useAllTrips()
-  const promos = useEco((s) => s.promos.filter((p) => p.active && p.endsAt > Date.now() && (p.audience === 'all' || (p.audience === 'gold' && customer.tier === 'gold') || p.audience === 'new')))
+  const promos = useEco((s) => (AUTH_MODE === 'supabase' ? [] : s.promos).filter((p) => p.active && p.endsAt > Date.now() && (p.audience === 'all' || (p.audience === 'gold' && customer.tier === 'gold') || p.audience === 'new')))
   const [topup, setTopup] = useState(false)
   const [amount, setAmount] = useState(10000)
   const [topBusy, setTopBusy] = useState(false)
@@ -431,6 +435,8 @@ function ProfilePanel({ customer, onClose }: { customer: Customer; onClose: () =
   const toast = useToast()
   const [name, setName] = useState(L(customer.name))
   const [email, setEmail] = useState(customer.email ?? '')
+  const [saving, setSaving] = useState(false)
+  const live = AUTH_MODE === 'supabase'
   return (
     <Panel title={t('الملف الشخصي', 'Profile')} onClose={onClose}>
       <div className="flex justify-center py-3">
@@ -440,8 +446,8 @@ function ProfilePanel({ customer, onClose }: { customer: Customer; onClose: () =
         <Field label={t('الاسم', 'Name')}>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label={t('البريد الإلكتروني', 'Email')}>
-          <Input dir="ltr" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Field label={t('البريد الإلكتروني', 'Email')} hint={live ? t('يُدار البريد من حساب الدخول، وغير قابل للتعديل هنا.', 'Email is managed by your sign-in account and cannot be edited here.') : undefined}>
+          <Input dir="ltr" value={email} disabled={live} onChange={(e) => setEmail(e.target.value)} />
         </Field>
         <Field label={t('رقم الجوال', 'Mobile')} hint={t('تغيير الرقم يتطلب تحققاً جديداً', 'Changing your number requires re-verification')}>
           <div dir="ltr" className="num flex h-12 items-center rounded-xl bg-road px-4 text-mute">
@@ -453,8 +459,17 @@ function ProfilePanel({ customer, onClose }: { customer: Customer; onClose: () =
         full
         size="lg"
         className="mt-5"
-        onClick={() => {
-          actions.updateCustomer(customer.id, { name: { ar: name, en: name }, email })
+        loading={saving}
+        disabled={name.trim().length < 2 || saving}
+        onClick={async () => {
+          if (live) {
+            // Live: profiles.full_name (column-limited self update under RLS).
+            setSaving(true)
+            const { error } = await getSupabase().from('profiles').update({ full_name: name.trim().slice(0, 80) }).eq('id', customer.id)
+            setSaving(false)
+            if (error) return toast(t('تعذّر حفظ التغييرات، حاول مرة أخرى.', 'Could not save the changes, try again.'), 'error')
+          }
+          actions.updateCustomer(customer.id, { name: { ar: name.trim(), en: name.trim() }, email })
           toast(t('تم حفظ التغييرات', 'Changes saved'))
           onClose()
         }}
@@ -467,7 +482,7 @@ function ProfilePanel({ customer, onClose }: { customer: Customer; onClose: () =
 
 function OffersList({ customer }: { customer: Customer }) {
   const { t, L, lang } = useI18n()
-  const promos = useEco((s) => s.promos.filter((p) => p.active && p.endsAt > Date.now()))
+  const promos = useEco((s) => (AUTH_MODE === 'supabase' ? [] : s.promos).filter((p) => p.active && p.endsAt > Date.now()))
   if (!promos.length) return <EmptyState icon={<Gift size={26} />} title={t('لا توجد عروض حالياً', 'No offers right now')} />
   return (
     <div className="space-y-2 pt-2">
@@ -555,7 +570,8 @@ function SafetyPanel({ onClose }: { onClose: () => void }) {
 export function HelpPanel({ requester, onClose }: { requester: Ticket['requester']; onClose: () => void }) {
   const { t, lang } = useI18n()
   const toast = useToast()
-  const tickets = useEco((s) => s.tickets.filter((x) => x.requester.id === requester.id && x.requester.kind === requester.kind))
+  const { tickets, refresh } = useMyTickets(requester)
+  const [sending, setSending] = useState(false)
   const [composing, setComposing] = useState(false)
   const [subject, setSubject] = useState('')
   const [cat, setCat] = useState<Ticket['category']>('help')
@@ -617,12 +633,17 @@ export function HelpPanel({ requester, onClose }: { requester: Ticket['requester
           full
           size="lg"
           className="mt-4"
-          disabled={subject.trim().length < 3 || text.trim().length < 5}
-          onClick={() => {
-            actions.createTicket({ requester, subject, category: cat, text })
+          loading={sending}
+          disabled={subject.trim().length < 3 || text.trim().length < 5 || sending}
+          onClick={async () => {
+            setSending(true)
+            const r = await openTicket({ requester, subject, category: cat, text })
+            setSending(false)
+            if (!r.ok) return toast(t('تعذّر إرسال التذكرة، حاول مرة أخرى.', 'Could not send the ticket, try again.'), 'error')
             setComposing(false)
             setSubject('')
             setText('')
+            void refresh()
             toast(t('تم إرسال التذكرة. سيرد فريق الدعم قريباً.', 'Ticket sent. Support will reply soon.'))
           }}
         >
@@ -644,10 +665,12 @@ export function HelpPanel({ requester, onClose }: { requester: Ticket['requester
             {cur.status !== 'resolved' && (
               <form
                 className="mt-3 flex gap-2"
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault()
-                  actions.replyTicket(cur.id, { from: requester.kind, text: reply })
+                  const r = await replyToTicket(cur.id, requester, reply)
+                  if (!r.ok) return toast(t('تعذّر إرسال الرد', 'Could not send the reply'), 'error')
                   setReply('')
+                  void refresh()
                 }}
               >
                 <Input value={reply} onChange={(e) => setReply(e.target.value)} placeholder={t('اكتب ردك…', 'Write a reply…')} />
@@ -683,7 +706,8 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 
 export function InboxPanel({ audience, onClose }: { audience: 'passengers' | 'captains'; onClose: () => void }) {
   const { t, L, lang } = useI18n()
-  const items = useEco((s) => s.inbox.filter((i) => i.to === 'all' || i.to === audience))
+  // Live mode: no notification service on the server yet — never show the demo broadcasts.
+  const items = useEco((s) => (AUTH_MODE === 'supabase' ? [] : s.inbox.filter((i) => i.to === 'all' || i.to === audience)))
   return (
     <Panel title={t('الإشعارات', 'Notifications')} onClose={onClose}>
       {items.length === 0 && <EmptyState icon={<Bell size={26} />} title={t('لا توجد إشعارات', 'No notifications')} />}

@@ -95,7 +95,11 @@ export function parseRideRequest(body: unknown): { ok: true; req: RideRequest } 
 /** Database errors are raised as "AURA: …" — pass those through, hide everything else. */
 export function publicError(e: unknown): string {
   const msg = e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : ''
-  return msg.startsWith('AURA:') ? msg.replace(/^AURA:\s*/, '') : 'internal_error'
+  if (msg.startsWith('AURA:')) return msg.replace(/^AURA:\s*/, '')
+  // The one-active-ride-per-rider unique index (double tap, app reopened mid-trip):
+  // tell the rider instead of a generic error. Other database details stay hidden.
+  if (msg.includes('rides_one_active_per_rider')) return 'you already have an active ride'
+  return 'internal_error'
 }
 
 export async function handleRequestRide(body: unknown, deps: Deps): Promise<Result> {

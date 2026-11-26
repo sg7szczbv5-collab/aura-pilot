@@ -33,6 +33,7 @@ import { AdminLogin, adminUserFromIdentity } from './Login'
 import { PrivacyPage } from './pages/Privacy'
 import { ApplicationsPage } from './pages/Applications'
 import { AUTH_MODE } from '../../auth/config'
+import { LiveCaptainsPage, LiveCustomersPage, LiveFinancePage, LiveMapServerPage, LiveOverviewPage, LivePricingPage, LiveStaffPage, LiveSupportPage, LiveTripsPage } from './live/LivePages'
 import { Activity, FileCheck2 } from 'lucide-react'
 import { ReadinessPage } from './pages/Readiness'
 import { auth } from '../../auth/authService'
@@ -53,6 +54,32 @@ import { ReportsPage } from './pages/Reports'
 import { RolesPage, SettingsPage } from './pages/System'
 
 type PageDef = { id: string; label: { ar: string; en: string }; icon: ReactNode; perm: Permission; el: () => ReactNode }
+
+/**
+ * Live (Supabase) mode: pages backed by the database replace the demo-store pages;
+ * pages with no server backing yet are hidden rather than showing demo data.
+ * See src/apps/admin/live/ and docs/beta/BETA_READINESS.md.
+ */
+const LIVE_PAGES: Record<string, (() => ReactNode) | null> = {
+  overview: () => <LiveOverviewPage />,
+  live: () => <LiveMapServerPage />,
+  trips: () => <LiveTripsPage />,
+  drivers: () => <LiveCaptainsPage />,
+  customers: () => <LiveCustomersPage />,
+  vehicles: null,
+  finance: () => <LiveFinancePage />,
+  pricing: () => <LivePricingPage />,
+  zones: null,
+  marketing: null,
+  reports: null,
+  support: () => <LiveSupportPage />,
+  roles: () => <LiveStaffPage />,
+  settings: null,
+}
+const forMode = (pages: PageDef[]): PageDef[] =>
+  AUTH_MODE !== 'supabase'
+    ? pages
+    : pages.flatMap((p) => (!(p.id in LIVE_PAGES) ? [p] : LIVE_PAGES[p.id] ? [{ ...p, el: LIVE_PAGES[p.id]! }] : []))
 type Group = { label: { ar: string; en: string }; pages: PageDef[] }
 
 const I = (n: ReactNode) => n
@@ -95,6 +122,7 @@ const GROUPS: Group[] = [
     ],
   },
 ]
+for (const g of GROUPS) g.pages = forMode(g.pages)
 const ALL_PAGES = GROUPS.flatMap((g) => g.pages)
 
 /** Is the stored staff session still within its absolute and idle limits? */

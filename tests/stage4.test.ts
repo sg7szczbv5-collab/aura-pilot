@@ -93,6 +93,11 @@ describe('request-ride handler', () => {
     expect((await handleRequestRide(body, fail('AURA: pickup is outside the service area'))).body).toEqual({ error: 'pickup is outside the service area' })
     expect((await handleRequestRide(body, fail('connection reset by peer'))).body).toEqual({ error: 'internal_error' })
     expect(publicError(new Error('AURA: x'))).toBe('x')
+    // Double request (unique index) → a message the app maps to «لديك رحلة نشطة بالفعل», other SQL stays hidden.
+    const dup = 'duplicate key value violates unique constraint "rides_one_active_per_rider_ix"'
+    expect((await handleRequestRide(body, fail(dup))).body).toEqual({ error: 'you already have an active ride' })
+    expect(requestErrorFrom('you already have an active ride')).toBe('active_exists')
+    expect(publicError({ message: 'duplicate key value violates unique constraint "payments_idem_ix"' })).toBe('internal_error')
   })
 })
 

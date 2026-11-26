@@ -3,6 +3,8 @@ import { MAPS_PROVIDER } from '../../maps/config'
 import { resolvePlace, reverseGeocode, searchLocal, searchPlaces } from '../../maps/places'
 import { etaFromCars, isPromoError, useNearbyCars, useQuotes } from '../../data/liveHooks'
 import { AUTH_MODE } from '../../auth/config'
+
+const CAN_SCHEDULE = AUTH_MODE !== 'supabase'
 import { trips } from '../../data/tripGateway'
 import { useCards } from '../../payments/PaymentUI'
 import {
@@ -126,10 +128,12 @@ export function PassengerHome({ customer, onWhereTo, onQuick, onOpenInbox, inbox
             <span className="num text-xs font-semibold">{day(reservations[0].at, lang)} {clock(reservations[0].at, lang)}</span>
           </div>
         )}
-        <div className="mt-3 grid grid-cols-3 gap-2" role="radiogroup" aria-label={t('نوع الرحلة', 'Trip type')}>
+        {/* Scheduled rides have no server backend yet: offered in the demo build only, so a
+            live booking is never kept on the device alone (docs/beta/BETA_READINESS.md). */}
+        <div className={cx('mt-3 grid gap-2', CAN_SCHEDULE ? 'grid-cols-3' : 'grid-cols-2')} role="radiogroup" aria-label={t('نوع الرحلة', 'Trip type')}>
           {[
             { id: 'ride' as const, icon: <Car size={20} {...ICON} />, label: t('رحلة', 'Ride') },
-            { id: 'schedule' as const, icon: <CalendarClock size={20} {...ICON} />, label: t('جدولة', 'Schedule') },
+            ...(CAN_SCHEDULE ? [{ id: 'schedule' as const, icon: <CalendarClock size={20} {...ICON} />, label: t('جدولة', 'Schedule') }] : []),
             { id: 'xl' as const, icon: <Users size={20} {...ICON} />, label: t('عائلي XL', 'Family XL') },
           ].map((x) => (
             <button

@@ -37,7 +37,7 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
     }
   })
   const trips = useEco((s) => s.trips)
-  const inboxCount = useEco((s) => s.inbox.filter((i) => (i.to === 'all' || i.to === 'captains') && i.at > seen).length)
+  const inboxCount = useEco((s) => (auth.mode === 'supabase' ? 0 : s.inbox.filter((i) => (i.to === 'all' || i.to === 'captains') && i.at > seen).length))
   useEco((s) => s.rev)
   const driver = getDriver(did)
   // Show the approval welcome once if this captain was under review during this session.

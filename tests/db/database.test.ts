@@ -23,7 +23,7 @@ const MIGRATIONS = join(ROOT, 'supabase', 'migrations')
 
 const EXPECTED_TABLES = [
   'audit_log', 'cities', 'driver_documents', 'driver_locations', 'drivers', 'payment_methods',
-  'payments', 'payouts', 'privacy_requests', 'profiles', 'promos', 'ride_events', 'ride_offers', 'ride_route_points', 'riders', 'rides', 'tariffs',
+  'payments', 'payouts', 'privacy_requests', 'profiles', 'promos', 'ride_events', 'ride_messages', 'ride_offers', 'ride_route_points', 'riders', 'rides', 'tariffs',
   'ticket_messages', 'tickets', 'trip_shares', 'user_consents', 'vehicles', 'wallet_accounts', 'wallet_ledger', 'wasl_sync_log', 'zones',
 ]
 
@@ -113,7 +113,7 @@ beforeAll(async () => {
 
 // ────────────────────────────────────────────────────────────────────────────
 describe('schema', () => {
-  it('creates exactly the 26 AURA tables (21 core + 2 privacy + 2 trip tracking + trip shares), all with RLS enabled', async () => {
+  it('creates exactly the 27 AURA tables (21 core + 2 privacy + 2 trip tracking + trip shares + ride chat), all with RLS enabled', async () => {
     const r = await db.query<{ tablename: string; rowsecurity: boolean }>(
       `select tablename, rowsecurity from pg_tables where schemaname = 'public' order by tablename`)
     expect(r.rows.map((x) => x.tablename)).toEqual(EXPECTED_TABLES)
@@ -338,6 +338,23 @@ describe('ride lifecycle (state machine, dispatch, PIN, settlement)', () => {
     expect(await rows(riderB, `select driver_id from driver_locations`)).toEqual([])
   })
 
+  it('in-trip chat (migration 018): only the two parties, sender set by the database', async () => {
+    await as(riderA, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, '  أنا عند البوابة  ')`, [rideId]))
+    await as(driver, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'وصلت')`, [rideId]))
+    // A client cannot choose the sender (column not granted) …
+    await expect(as(riderA, (tx) => tx.query(`insert into ride_messages (ride_id, body, sender_id) values ($1, 'x', $2)`, [rideId, driver]))).rejects.toThrow(/permission denied/)
+    const m = await rows<{ sender_kind: string; sender_id: string; body: string }>(driver, `select sender_kind, sender_id, body from ride_messages where ride_id = $1 order by created_at, sender_kind desc`, [rideId])
+    expect(m).toEqual([
+      { sender_kind: 'rider', sender_id: riderA, body: 'أنا عند البوابة' },
+      { sender_kind: 'driver', sender_id: driver, body: 'وصلت' },
+    ])
+    // … another rider can neither read nor write, and nobody can edit or delete.
+    expect(await rows(riderB, `select id from ride_messages`)).toEqual([])
+    await expect(as(riderB, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'hi')`, [rideId]))).rejects.toThrow(/row-level security/)
+    await expect(as(riderA, (tx) => tx.query(`update ride_messages set body = 'edited' where ride_id = $1`, [rideId]))).rejects.toThrow(/permission denied/)
+    await expect(as(riderA, (tx) => tx.query(`delete from ride_messages where ride_id = $1`, [rideId]))).rejects.toThrow(/permission denied/)
+  })
+
   it('trip starts only with the rider PIN', async () => {
     const code = (await one<{ code: string }>(riderA, `select issue_ride_verification_code($1) as code`, [rideId])).code
     expect(code).toMatch(/^\d{4}$/)
@@ -355,6 +372,13 @@ describe('ride lifecycle (state machine, dispatch, PIN, settlement)', () => {
     expect(e.map((x) => x.to_status)).toEqual(
       ['searching', 'driver_assigned', 'driver_arriving', 'driver_arrived', 'in_progress', 'completed'])
     await expect(as('service', (tx) => tx.query(`delete from ride_events where ride_id = $1`, [rideId]))).rejects.toThrow(/append-only/)
+  })
+
+  it('in-trip chat is closed once the trip has ended; retention purges it later', async () => {
+    await expect(as(riderA, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'late')`, [rideId]))).rejects.toThrow(/row-level security/)
+    expect((await rows(riderA, `select id from ride_messages where ride_id = $1`, [rideId])).length).toBe(2) // still readable
+    await expect(rows(riderA, `select private.purge_ride_messages(0)`)).rejects.toThrow(/permission denied/)
+    expect((await one<{ n: number }>('service', `select private.purge_ride_messages(30) as n`)).n).toBe(0) // too recent
   })
 
   it('settles a cash ride with a balanced double entry, once (automatically on completion since Stage 5)', async () => {
@@ -1330,5 +1354,177 @@ describe('captain resubmission: driver_save_vehicle + re-upload + submit (migrat
     const d = await one<{ status: string; status_reason: string | null; current_vehicle_id: string }>(cap,
       `select status, status_reason, current_vehicle_id from submit_driver_application()`)
     expect(d).toEqual({ status: 'pending_review', status_reason: null, current_vehicle_id: v2.id })
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('BETA: concurrency, isolation and failure cases', () => {
+  let capA: string, capB: string, riderX: string, riderY: string, ride: string
+  const PICK: [number, number] = [24.69, 46.72]
+  const request = (rider: string) =>
+    one<{ id: string }>('service', `select id from create_ride($1, 'riyadh', 'go', $2, $3, 'Beta pickup', 24.72, 46.70, 'Beta drop', 5000, 700, 'cash')`, [rider, PICK[0], PICK[1]])
+
+  beforeAll(async () => {
+    capA = await makeCaptain('966545000001', 'Beta Captain A', 'go', 24.6905, 46.7205)
+    capB = await makeCaptain('966545000002', 'Beta Captain B', 'go', 24.70, 46.73)
+    riderX = await newUser('966545100001', 'Beta Rider X')
+    riderY = await newUser('966545100002', 'Beta Rider Y')
+    await acceptRequiredConsents(riderX, 'rider')
+    await acceptRequiredConsents(riderY, 'rider')
+  })
+
+  it('a duplicate request while a ride is active is refused (one active ride per rider)', async () => {
+    ride = (await request(riderX)).id
+    await expect(request(riderX)).rejects.toThrow(/rides_one_active_per_rider/) // enforced by a unique index
+  })
+
+  it('only the offered captain can accept, exactly once — never two captains on one ride', async () => {
+    expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [ride])).d).toBe(capA)
+    await expect(one(capB, `select accept_ride($1)`, [ride])).rejects.toThrow(/no longer available/)
+    expect((await one<{ status: string }>(capA, `select (accept_ride($1)).status`, [ride])).status).toBe('driver_assigned')
+    await expect(one(capA, `select accept_ride($1)`, [ride])).rejects.toThrow(/no longer available/)
+    await expect(one(capB, `select accept_ride($1)`, [ride])).rejects.toThrow(/no longer available/)
+    const r = await one<{ driver_id: string; status: string }>('service', `select driver_id, status from rides where id = $1`, [ride])
+    expect(r).toEqual({ driver_id: capA, status: 'driver_assigned' })
+  })
+
+  it('another rider and another captain see nothing of this ride, its log, route, chat or money', async () => {
+    for (const who of [riderY, capB]) {
+      expect(await rows(who, `select id from rides where id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select id from ride_events where ride_id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select ride_id from ride_route_points where ride_id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select id from ride_messages where ride_id = $1`, [ride])).toEqual([])
+      expect(await rows(who, `select id from payments where ride_id = $1`, [ride])).toEqual([])
+      await expect(one(who, `select ride_view($1)`, [ride])).rejects.toThrow()
+      await expect(one(who, `select transition_ride($1, 'cancelled', 'x')`, [ride])).rejects.toThrow(/not allowed/)
+    }
+    // Wallets / ledgers / payouts are private to their owner.
+    const xs = await rows<{ owner_id: string }>(riderY, `select owner_id from wallet_accounts`)
+    expect(xs.every((w) => w.owner_id === riderY)).toBe(true)
+    expect(await rows(capB, `select id from payouts where driver_id = $1`, [capA])).toEqual([])
+    expect((await rows<{ id: string }>(riderY, `select id from profiles`)).map((p) => p.id)).toEqual([riderY])
+  })
+
+  it('illegal transitions are refused (rider cannot start/complete; captain cannot skip states)', async () => {
+    await expect(one(riderX, `select transition_ride($1, 'in_progress')`, [ride])).rejects.toThrow()
+    await expect(one(riderX, `select transition_ride($1, 'completed')`, [ride])).rejects.toThrow()
+    await expect(one(capA, `select transition_ride($1, 'completed')`, [ride])).rejects.toThrow(/illegal ride transition/)
+    await expect(one(capA, `select start_ride($1, '0000')`, [ride])).rejects.toThrow(/arrived first/) // cannot start before arriving
+    expect((await one<{ status: string }>('service', `select status from rides where id = $1`, [ride])).status).toBe('driver_assigned')
+  })
+
+  it('a cancelled ride cannot be revived, completed or settled; the rider can request again', async () => {
+    await one(riderX, `select transition_ride($1, 'cancelled', 'Changed plans')`, [ride])
+    await expect(one(capA, `select transition_ride($1, 'driver_arriving')`, [ride])).rejects.toThrow()
+    await expect(one(capA, `select transition_ride($1, 'completed')`, [ride])).rejects.toThrow()
+    const ev = await rows<{ to_status: string; actor: string }>(riderX, `select to_status, actor from ride_events where ride_id = $1 order by created_at`, [ride])
+    expect(ev.at(-1)).toEqual({ to_status: 'cancelled', actor: 'rider' })
+    const again = await request(riderX)
+    expect(again.id).not.toBe(ride)
+    await one(riderX, `select transition_ride($1, 'cancelled', 'cleanup')`, [again.id])
+  })
+
+  it('admin cancellation (live Trips page): needs trips.cancel + MFA, recorded as admin', async () => {
+    const ops = await newAdmin('966545200001', 'operations_manager')
+    const r3 = (await request(riderX)).id
+    await expect(one(support, `select transition_ride($1, 'cancelled', 'x')`, [r3])).rejects.toThrow(/not allowed/)
+    await expect(as(ops, (tx) => tx.query(`select transition_ride($1, 'cancelled', 'x')`, [r3]), { aal: 'aal1' })).rejects.toThrow(/not allowed/)
+    await one(ops, `select transition_ride($1, 'cancelled', 'عدم استيفاء شروط الفئة المطلوبة')`, [r3])
+    const r = await one<{ status: string; cancelled_by: string; cancellation_reason: string }>('service', `select status, cancelled_by, cancellation_reason from rides where id = $1`, [r3])
+    expect(r).toEqual({ status: 'cancelled', cancelled_by: 'admin', cancellation_reason: 'عدم استيفاء شروط الفئة المطلوبة' })
+    expect((await rows<{ actor: string }>(riderX, `select actor from ride_events where ride_id = $1 and to_status = 'cancelled'`, [r3]))[0].actor).toBe('admin')
+  })
+
+  it('a late accept after the offer expired is refused and the ride is offered again', async () => {
+    const r2 = (await request(riderY)).id
+    expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [r2])).d).toBe(capA)
+    await db.query(`update rides set offer_expires_at = now() - interval '1 second' where id = $1`, [r2])
+    await expect(one(capA, `select accept_ride($1)`, [r2])).rejects.toThrow(/no longer available/)
+    await one('service', `select expire_ride_offers()`)
+    const next = await one<{ d: string | null }>('service', `select dispatch_ride($1) as d`, [r2])
+    expect(next.d).toBe(capB) // capA timed out on this ride and is not offered it again
+    await one(riderY, `select transition_ride($1, 'cancelled', 'cleanup')`, [r2])
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('PDPL for in-trip chat (migration 019): export and erasure cover ride_messages', () => {
+  let riderZ: string, capZ: string, rideZ: string
+  type Exported = { ride_messages: { ride_number: number; sender: string; body: string }[] }
+
+  beforeAll(async () => {
+    capZ = await makeCaptain('966547000001', 'Privacy Captain Z', 'go', 24.6605, 46.7105)
+    riderZ = await newUser('966547100001', 'Privacy Rider Z')
+    await acceptRequiredConsents(riderZ, 'rider')
+    rideZ = (await one<{ id: string }>('service',
+      `select id from create_ride($1, 'riyadh', 'go', 24.66, 46.71, 'Privacy pickup', 24.70, 46.69, 'Privacy drop', 5000, 700, 'cash')`, [riderZ])).id
+    expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [rideZ])).d).toBe(capZ)
+    await one(capZ, `select accept_ride($1)`, [rideZ])
+    await as(riderZ, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'رقمي الخاص 0550000000، اتصل بي')`, [rideZ]))
+    await as(capZ, (tx) => tx.query(`insert into ride_messages (ride_id, body) values ($1, 'أنا عند البوابة الشمالية')`, [rideZ]))
+  })
+
+  it('export_my_data includes the messages the user sent — and only those', async () => {
+    const { d } = await one<{ d: Exported & { format: string } }>(riderZ, `select export_my_data() as d`)
+    expect(d.format).toBe('aura.personal-data.v2')
+    expect(d.ride_messages).toEqual([expect.objectContaining({ sender: 'rider', body: 'رقمي الخاص 0550000000، اتصل بي' })])
+    const cap = (await one<{ d: Exported }>(capZ, `select export_my_data() as d`)).d
+    expect(cap.ride_messages.map((m) => m.body)).toEqual(['أنا عند البوابة الشمالية']) // not the rider's text
+    const other = (await one<{ d: Exported }>(riderB, `select export_my_data() as d`)).d
+    expect(other.ride_messages.some((m) => m.body.includes('0550000000'))).toBe(false)
+  })
+
+  it('erasure is still refused during an active ride and cannot be called by users', async () => {
+    await expect(one('service', `select private.erase_user($1)`, [riderZ])).rejects.toThrow(/active ride/)
+    await expect(one(riderZ, `select private.erase_user($1)`, [riderZ])).rejects.toThrow(/permission denied/)
+  })
+
+  it('erase_user replaces the text the user sent; the other party’s messages are untouched', async () => {
+    await one(riderZ, `select transition_ride($1, 'cancelled', 'privacy test')`, [rideZ])
+    await one('service', `select private.erase_user($1)`, [riderZ])
+    const msgs = await rows<{ sender_kind: string; body: string; sender_id: string }>('service',
+      `select sender_kind, body, sender_id from ride_messages where ride_id = $1 order by created_at, sender_kind desc`, [rideZ])
+    expect(msgs).toEqual([
+      { sender_kind: 'rider', body: '[erased]', sender_id: riderZ },
+      { sender_kind: 'driver', body: 'أنا عند البوابة الشمالية', sender_id: capZ },
+    ])
+    expect((await one<{ n: number }>('service', `select count(*)::int as n from ride_messages where body like '%0550000000%'`)).n).toBe(0)
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('tariff bounds (migration 020) for the admin Pricing page', () => {
+  let tariffId: string
+  const upd = (who: string, col: string, v: number) =>
+    as(who, async (tx) => (await tx.query(`update tariffs set ${col} = $2 where id = $1 returning id`, [tariffId, v])).rows)
+
+  beforeAll(async () => {
+    tariffId = (await one<{ id: string }>('service', `select t.id from tariffs t join cities c on c.id = t.city_id where c.code = 'riyadh' and t.vehicle_class = 'go' and t.is_active`)).id
+  })
+
+  it('every seeded tariff satisfies the new bounds', async () => {
+    const bad = await rows('service', `select id from tariffs where not (base_fare_halalas between 0 and 10000 and per_km_halalas between 50 and 2000
+      and per_min_halalas between 0 and 500 and min_fare_halalas between 500 and 20000 and cancellation_fee_halalas between 0 and 10000)`)
+    expect(bad).toEqual([])
+  })
+
+  it('rejects zero / out-of-range values from staff with pricing.edit', async () => {
+    await expect(upd(finance, 'per_km_halalas', 0)).rejects.toThrow(/tariffs_per_km_bounds/)
+    await expect(upd(finance, 'per_km_halalas', 2001)).rejects.toThrow(/tariffs_per_km_bounds/)
+    await expect(upd(finance, 'base_fare_halalas', 10001)).rejects.toThrow(/tariffs_base_fare_bounds/)
+    await expect(upd(finance, 'base_fare_halalas', -1)).rejects.toThrow(/base_fare/)
+    await expect(upd(finance, 'per_min_halalas', 501)).rejects.toThrow(/tariffs_per_min_bounds/)
+    await expect(upd(finance, 'min_fare_halalas', 499)).rejects.toThrow(/tariffs_min_fare_bounds/)
+    await expect(upd(finance, 'cancellation_fee_halalas', 10001)).rejects.toThrow(/tariffs_cancellation_fee_bounds/)
+    await expect(upd(finance, 'commission_bps', 5001)).rejects.toThrow(/commission/)
+  })
+
+  it('accepts valid values at the bounds; staff without pricing.edit change nothing', async () => {
+    const before = await one<{ per_km_halalas: number }>('service', `select per_km_halalas from tariffs where id = $1`, [tariffId])
+    expect(await upd(finance, 'per_km_halalas', 50)).toHaveLength(1)
+    expect(await upd(finance, 'per_km_halalas', 2000)).toHaveLength(1)
+    expect(await upd(support, 'per_km_halalas', 999)).toEqual([]) // RLS: no pricing.edit → no row
+    expect(await upd(finance, 'per_km_halalas', before.per_km_halalas)).toHaveLength(1) // restore for later tests
+    expect((await one<{ per_km_halalas: number }>('service', `select per_km_halalas from tariffs where id = $1`, [tariffId])).per_km_halalas).toBe(before.per_km_halalas)
   })
 })
