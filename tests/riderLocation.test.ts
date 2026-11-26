@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  CITY_CENTER, GPS_PICKUP_ID, MAX_GPS_PICKUP_AGE_MS, capability, clientPinBlock, coarseForNearby, shouldApplyFix, UNSET_PICKUP, locateOnce, mayApplyFix, pickupFromFix, readPermission, shouldAutoLocate, validatePickup,
+  CITY_CENTER, GPS_PICKUP_ID, MAX_GPS_PICKUP_AGE_MS, canRequestLocation, capability, clientPinBlock, createRequestGate, coarseForNearby, shouldApplyFix, UNSET_PICKUP, locateOnce, mayApplyFix, pickupFromFix, readPermission, shouldAutoLocate, validatePickup,
 } from '../src/location/riderLocation'
 import { DEMO_CURRENT } from '../src/core/geo'
 import { serverGateway } from '../src/data/tripGateway'
@@ -201,5 +201,126 @@ describe('F5 — the nearby-cars query is coarse; the ride request is not', () =
     expect(c).toEqual({ lat: 24.774, lng: 46.739 })
     expect(Math.abs(c.lat - p.lat)).toBeLessThanOrEqual(0.0005)
     expect(Math.abs(c.lng - p.lng)).toBeLessThanOrEqual(0.0005)
+  })
+})
+
+/** A controllable browser: every getCurrentPosition call waits until the test resolves it. */
+function deferredGeo() {
+  const calls: { ok: PositionCallback; err?: PositionErrorCallback | null }[] = []
+  return {
+    calls,
+    geolocation: { getCurrentPosition: (ok: PositionCallback, err?: PositionErrorCallback | null) => void calls.push({ ok, err }) },
+    resolve: (i: number, pos: { lat: number; lng: number }, timestamp: number) =>
+      calls[i].ok({ coords: { latitude: pos.lat, longitude: pos.lng, accuracy: 12 }, timestamp } as unknown as GeolocationPosition),
+  }
+}
+
+describe('L1 — a fix is as old as the reading (Position.timestamp), not as its delivery', () => {
+  const NOW = 1_800_000_000_000
+  const fixWithTimestamp = async (timestamp: number) => {
+    const g = geo({ ok: { latitude: RIYADH.lat, longitude: RIYADH.lng, accuracy: 10 } })
+    g.getCurrentPosition.mockImplementation((ok: PositionCallback) => ok({ coords: { latitude: RIYADH.lat, longitude: RIYADH.lng, accuracy: 10 }, timestamp } as unknown as GeolocationPosition))
+    return locateOnce({ geolocation: g, isSecureContext: true, now: () => NOW })
+  }
+  it('a fresh reading keeps its own timestamp and is valid', async () => {
+    const r = await fixWithTimestamp(NOW - 20_000)
+    expect(r.at).toBe(NOW - 20_000)
+    expect(validatePickup(pickupFromFix(r.pos!, r.accuracyM, r.at), true, NOW)).toEqual({ ok: true })
+  })
+  it('an OLD cached reading delivered now is refused as stale (the callback time would have hidden it)', async () => {
+    const r = await fixWithTimestamp(NOW - MAX_GPS_PICKUP_AGE_MS - 1_000)
+    expect(r.status).toBe('located')
+    expect(r.at).toBe(NOW - MAX_GPS_PICKUP_AGE_MS - 1_000)
+    expect(validatePickup(pickupFromFix(r.pos!, r.accuracyM, r.at), true, NOW)).toEqual({ ok: false, problem: 'stale_gps' })
+  })
+  it('the 5-minute limit is unchanged: just inside passes, just outside fails', async () => {
+    const inside = await fixWithTimestamp(NOW - MAX_GPS_PICKUP_AGE_MS + 1_000)
+    expect(validatePickup(pickupFromFix(inside.pos!, 10, inside.at), true, NOW).ok).toBe(true)
+    expect(MAX_GPS_PICKUP_AGE_MS).toBe(5 * 60_000)
+  })
+  it('a reading from the FUTURE (bad clock) is refused; small skew (< 1 min) is tolerated', async () => {
+    const future = await fixWithTimestamp(NOW + 10 * 60_000)
+    expect(validatePickup(pickupFromFix(future.pos!, 10, future.at), true, NOW)).toEqual({ ok: false, problem: 'stale_gps' })
+    const skew = await fixWithTimestamp(NOW + 20_000)
+    expect(validatePickup(pickupFromFix(skew.pos!, 10, skew.at), true, NOW).ok).toBe(true)
+  })
+  it('a missing / zero / invalid timestamp falls back to the delivery time', async () => {
+    for (const ts of [0, -5, NaN, undefined as unknown as number]) expect((await fixWithTimestamp(ts)).at).toBe(NOW)
+  })
+})
+
+describe('L2 — "Use my location" during a pending automatic request: latest request wins', () => {
+  const A = { lat: 24.70, lng: 46.60 } // automatic (slow) reading
+  const B = { lat: 24.80, lng: 46.70 } // the tap's reading
+  /** The hook's flow without React: gate (latest only) + pickup revision token (F1) + shouldApplyFix. */
+  function harness() {
+    const g = deferredGeo()
+    const gate = createRequestGate()
+    let rev = 0
+    let pickup: Place = UNSET_PICKUP
+    let state: { status: 'idle' | 'locating' | 'located'; byUser?: boolean } = { status: 'idle' }
+    const start = (byUser: boolean) => {
+      const id = gate.begin()
+      const token = rev
+      state = { status: 'locating', byUser }
+      return locateOnce({ geolocation: g.geolocation, isSecureContext: true }).then((r) => {
+        if (!gate.owns(id)) return 'discarded'
+        state = { status: 'located', byUser }
+        if (shouldApplyFix({ status: r.status, token, byUser, currentRev: rev, current: pickup, live: true, inDemoArea: true })) pickup = pickupFromFix(r.pos!, r.accuracyM, r.at)
+        return 'owned'
+      })
+    }
+    return { g, start, manual: (p: Place) => { rev++; pickup = p }, get pickup() { return pickup }, get state() { return state } }
+  }
+
+  it('the button is offered while the AUTOMATIC request is pending, not while the rider\'s own tap is', () => {
+    expect(canRequestLocation({ status: 'locating', byUser: false }, false, false)).toBe(true)
+    expect(canRequestLocation({ status: 'locating', byUser: true }, false, false)).toBe(false)
+    expect(canRequestLocation({ status: 'denied' }, false, false)).toBe(false)
+    expect(canRequestLocation({ status: 'unsupported' }, false, false)).toBe(false)
+    expect(canRequestLocation({ status: 'located' }, true, false)).toBe(false) // fresh GPS pickup already set
+    expect(canRequestLocation({ status: 'located' }, true, true)).toBe(true) // stale → refresh
+    expect(canRequestLocation({ status: 'idle' }, false, false)).toBe(true)
+  })
+  it('tap during the pending automatic request; the automatic reading lands LAST → discarded, the tap\'s reading is the pickup', async () => {
+    const h = harness()
+    const auto = h.start(false)
+    const tap = h.start(true)
+    h.g.resolve(1, B, Date.now())
+    expect(await tap).toBe('owned')
+    h.g.resolve(0, A, Date.now())
+    expect(await auto).toBe('discarded')
+    expect(h.pickup.pos).toEqual(B)
+  })
+  it('the automatic reading lands FIRST → still discarded (not the latest); the pickup waits for the tap', async () => {
+    const h = harness()
+    const auto = h.start(false)
+    const tap = h.start(true)
+    h.g.resolve(0, A, Date.now())
+    expect(await auto).toBe('discarded')
+    expect(h.pickup.id).toBe(UNSET_PICKUP.id)
+    expect(h.state.status).toBe('locating')
+    h.g.resolve(1, B, Date.now())
+    await tap
+    expect(h.pickup.pos).toEqual(B)
+  })
+  it('a manual pin after the tap beats both pending readings (F1 kept)', async () => {
+    const h = harness()
+    const auto = h.start(false)
+    const tap = h.start(true)
+    const manual = pin({ lat: 24.75, lng: 46.65 })
+    h.manual(manual)
+    h.g.resolve(0, A, Date.now())
+    h.g.resolve(1, B, Date.now())
+    await Promise.all([auto, tap])
+    expect(h.pickup).toBe(manual)
+  })
+  it('a gate number is owned only until the next request begins', () => {
+    const g = createRequestGate()
+    const a = g.begin()
+    expect(g.owns(a)).toBe(true)
+    const b = g.begin()
+    expect(g.owns(a)).toBe(false)
+    expect(g.owns(b)).toBe(true)
   })
 })

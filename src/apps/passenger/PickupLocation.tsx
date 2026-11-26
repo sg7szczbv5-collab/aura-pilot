@@ -8,7 +8,7 @@ import { Crosshair, LocateFixed, MapPin, Search } from 'lucide-react'
 import type { Place } from '../../core/types'
 import { cx, ICON, Spinner } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
-import { APPROXIMATE_ACCURACY_M, GPS_PICKUP_ID, UNSET_PICKUP, validatePickup, type LocState, type PermissionHint } from '../../location/riderLocation'
+import { APPROXIMATE_ACCURACY_M, GPS_PICKUP_ID, canRequestLocation, UNSET_PICKUP, validatePickup, type LocState, type PermissionHint } from '../../location/riderLocation'
 
 export type PickupLocationProps = {
   pickup: Place
@@ -49,7 +49,8 @@ export function PickupLocation({ pickup, location, onPickOnMap, onSearch }: Pick
   } else if (unset) line = t('حدّد نقطة الالتقاء لطلب رحلة.', 'Set your pickup to request a ride.')
   else line = L(pickup.sub)
 
-  const canAsk = status !== 'locating' && status !== 'denied' && status !== 'unsupported' && status !== 'insecure' && (!fromGps || stale)
+  // L2: also offered while an automatic request is pending — the tap supersedes it (latest wins).
+  const canAsk = canRequestLocation(location.state, fromGps, stale)
   return (
     <section aria-label={t('نقطة الالتقاء', 'Pickup')} className="mb-2.5 rounded-2xl border border-line px-3 py-2.5" data-testid="pickup-location">
       <div className="flex items-center gap-2.5">

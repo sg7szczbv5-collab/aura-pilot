@@ -11,6 +11,8 @@
  *   F3 demo zones never block a LIVE pin; the server's refusal is shown
  *   F4 destination chosen ON THE MAP still requires a valid pickup first
  *   F5 the nearby-cars query is coarse (~100 m); the ride request keeps full precision
+ *   L1 a fix is as old as its reading (Position.timestamp): an old cached or future reading is refused
+ *   L2 "Use my location" works while an automatic request is pending; the latest request wins
  */
 const { chromium } = require('playwright')
 const { spawn } = require('node:child_process')
@@ -84,16 +86,23 @@ function backend() {
 }
 
 let CURRENT = null
-async function open(browser, { grant = false, geo = RIYADH, delayExplicitMs = 0, label }) {
+async function open(browser, { grant = false, geo = RIYADH, delayExplicitMs = 0, plan = null, label }) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, locale: 'ar-SA' })
   if (grant) await ctx.grantPermissions(['geolocation'], { origin: BASE })
   await ctx.setGeolocation({ ...geo, accuracy: 15 })
-  await ctx.addInitScript((d) => {
+  await ctx.addInitScript(({ d, plan }) => {
     const g = navigator.geolocation, o = g.getCurrentPosition.bind(g); let n = 0
     window.__geoCalls = 0
     window.__setGeo = null
-    g.getCurrentPosition = (ok, err, opt) => { n++; window.__geoCalls++; if (d && n > 1) return setTimeout(() => o(ok, err, opt), d); return o(ok, err, opt) }
-  }, delayExplicitMs)
+    g.getCurrentPosition = (ok, err, opt) => {
+      n++; window.__geoCalls++
+      // plan[i]: the i-th call answers after ms with these coordinates and a reading ageMs old (L1/L2).
+      const step = plan && plan[n - 1]
+      if (step) return setTimeout(() => ok({ coords: { latitude: step.lat, longitude: step.lng, accuracy: 15 }, timestamp: Date.now() - (step.ageMs || 0) }), step.ms || 0)
+      if (d && n > 1) return setTimeout(() => o(ok, err, opt), d)
+      return o(ok, err, opt)
+    }
+  }, { d: delayExplicitMs, plan })
   const be = backend()
   await ctx.route(`${API}/**`, be.handle)
   await ctx.routeWebSocket(new RegExp(`${REF}\\.supabase\\.co`), (ws) => { ws.onMessage(() => {}) }) // Realtime: answered locally, silent
@@ -143,6 +152,13 @@ async function payCashAndConfirm(p) {
     await p.locator('text=نقداً >> visible=true').last().click(); await p.waitForTimeout(600)
   }
   await p.getByRole('button', { name: 'تأكيد الرحلة' }).click(); await p.waitForTimeout(1500)
+}
+/** The pickup's coordinates as the pin screen shows them (opens and closes the pin screen). */
+async function pickupCoords(p) {
+  await p.getByRole('button', { name: 'ضبط الدبوس' }).click(); await p.waitForTimeout(700)
+  const m = (await body(p)).match(/(\d{2}\.\d{4}), (\d{2}\.\d{4})/)
+  await p.getByRole('button', { name: /رجوع/ }).first().click(); await p.waitForTimeout(500)
+  return m ? `${m[1]}, ${m[2]}` : '?'
 }
 async function toConfirm(p) {
   await p.getByRole('button', { name: /^اختيار/ }).first().click(); await p.waitForTimeout(800)
@@ -270,6 +286,61 @@ async function toConfirm(p) {
     check(!(await t.page.getByRole('button', { name: 'تأكيد الرحلة' }).isEnabled()), 'F2: confirm is disabled once the GPS pickup is stale')
     check(t.be.s.rides.length === 0, 'F2: no request was sent')
     await t.page.screenshot({ path: `${OUT}/live-5-stale.png` })
+    await t.ctx.close()
+
+    // ── L2: "Use my location" during a pending AUTOMATIC request — latest request wins ─────────
+    const A = { lat: 24.7001, lng: 46.6001 }, B = { lat: 24.8002, lng: 46.7002 }
+    // (a) the automatic reading lands AFTER the tap's: discarded
+    t = await open(browser, { grant: true, plan: [{ ms: 6000, ...A }, { ms: 500, ...B }], label: 'L2a' })
+    check(/جارٍ تحديد/.test(await status(t.page)), 'L2: automatic request pending')
+    const tapBtn = t.page.getByRole('button', { name: 'استخدام موقعي' })
+    check((await tapBtn.count()) === 1, 'L2: "Use my location" is offered while the automatic request is pending')
+    await tapBtn.click(); await t.page.waitForTimeout(1500)
+    check(/موقعك الحالي/.test(await name(t.page)), 'L2: the tap\'s reading sets the pickup')
+    check((await t.page.getByRole('button', { name: 'استخدام موقعي' }).count()) === 0, 'L2: no second button once a fresh GPS pickup is set')
+    await t.page.waitForTimeout(5500) // the automatic reading (A) arrives now
+    const ca = await pickupCoords(t.page)
+    check(ca === '24.8002, 46.7002', `L2: the late automatic reading is discarded — pickup stays the tap's (${ca})`)
+    check(t.errors.length === 0, `no JavaScript errors (${t.errors.join(' | ')})`)
+    await t.ctx.close()
+    // (b) the automatic reading lands FIRST: still discarded, the pickup waits for the tap
+    t = await open(browser, { grant: true, plan: [{ ms: 4000, ...A }, { ms: 5000, ...B }], label: 'L2b' })
+    await t.page.getByRole('button', { name: 'استخدام موقعي' }).click(); await t.page.waitForTimeout(3800) // A has landed, B not yet
+    check(/غير محددة/.test(await name(t.page)) && /جارٍ تحديد/.test(await status(t.page)), `L2: the earlier automatic reading is not applied; still waiting for the tap (${await name(t.page)})`)
+    await t.page.waitForTimeout(2500)
+    const cb = await pickupCoords(t.page)
+    check(cb === '24.8002, 46.7002', `L2: the tap's reading wins (${cb})`)
+    await t.ctx.close()
+    // (c) tap during the automatic request, then a manual pin before both land: the pin is kept
+    t = await open(browser, { grant: true, plan: [{ ms: 5000, ...A }, { ms: 5000, ...B }], label: 'L2c' })
+    await t.page.getByRole('button', { name: 'استخدام موقعي' }).click(); await t.page.waitForTimeout(300)
+    await t.page.getByRole('button', { name: 'على الخريطة' }).click(); await t.page.waitForTimeout(800)
+    await pinHere(t.page, 40, -40)
+    await t.page.getByRole('button', { name: /رجوع/ }).first().click(); await t.page.waitForTimeout(400)
+    const pinned = await name(t.page)
+    await t.page.waitForTimeout(5500)
+    check(/موقع محدد/.test(pinned) && (await name(t.page)) === pinned, `L2 + F1: both late readings dropped, manual pin kept (${pinned} → ${await name(t.page)})`)
+    await t.ctx.close()
+
+    // ── L1: the age of a fix is the age of its reading ────────────────────────────────────────
+    t = await open(browser, { grant: true, plan: [{ ms: 0, ...B, ageMs: 10 * 60_000 }], label: 'L1-old' })
+    check(/GPS قديم/.test(await status(t.page)), `L1: an old cached reading (10 min) is flagged at once (${await status(t.page)})`)
+    check((await t.page.getByRole('button', { name: 'تحديث موقعي' }).count()) === 1, 'L1: "Refresh location" is offered')
+    await t.page.getByText('إلى أين اليوم؟').click(); await t.page.waitForTimeout(700)
+    await chooseDestinationBySearch(t.page)
+    check(/تأكيد موقع الانطلاق/.test(await body(t.page)), 'L1: the old reading is not priced — the rider is sent to choose a pickup')
+    check(t.be.s.rides.length === 0, 'L1: no request was sent')
+    await t.ctx.close()
+    t = await open(browser, { grant: true, plan: [{ ms: 0, ...B, ageMs: -10 * 60_000 }], label: 'L1-future' })
+    check(/GPS قديم/.test(await status(t.page)), 'L1: a reading from the future (bad clock) is refused too')
+    await t.ctx.close()
+    t = await open(browser, { grant: true, plan: [{ ms: 0, ...B, ageMs: 60_000 }], label: 'L1-fresh' })
+    check(/تم تحديد موقعك/.test(await status(t.page)), 'L1: a 1-minute-old reading is accepted')
+    await t.page.getByText('إلى أين اليوم؟').click(); await t.page.waitForTimeout(700)
+    await chooseDestinationBySearch(t.page)
+    await toConfirm(t.page)
+    check(await t.page.getByRole('button', { name: 'تأكيد الرحلة' }).isEnabled(), 'L1: …and can be confirmed')
+    check(t.leaks.length === 0 && t.errors.length === 0, 'no leaks, no JavaScript errors')
     await t.ctx.close()
   } catch (e) {
     if (CURRENT) {

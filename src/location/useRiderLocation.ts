@@ -4,7 +4,7 @@
  *  - otherwise only when the rider taps "Use my location" (request()).
  * Nothing is persisted: the fix lives in memory only.
  *
- * F1: every request gets a sequence number — only the LATEST request may report a result, so a tap
+ * F1/L2: every request gets a number from a request gate — only the LATEST request may report a result, so a tap
  * during a pending request is never dropped and an older request can never land after it. Each
  * result also carries the pickup revision (token) captured when it was requested; the caller drops
  * it if the rider changed the pickup by hand since.
@@ -13,7 +13,7 @@
  * Permissions API is optional: without it, a refusal is retried only by an explicit tap.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { capability, locateOnce, readPermission, shouldAutoLocate, type LocState, type PermissionHint } from './riderLocation'
+import { capability, createRequestGate, locateOnce, readPermission, shouldAutoLocate, type LocState, type PermissionHint } from './riderLocation'
 
 /** One automatic attempt per page load, shared by every mount (tabs, re-renders). */
 let autoTried = false
@@ -24,20 +24,20 @@ type PermissionsLike = { query(d: { name: 'geolocation' }): Promise<PermissionSt
 export function useRiderLocation(enabled: boolean, getToken: () => number = () => 0): { state: LocState; permission: PermissionHint; request: () => void } {
   const [state, setState] = useState<LocState>({ status: 'idle' })
   const [permission, setPermission] = useState<PermissionHint>('unknown')
-  const seq = useRef(0)
+  const gate = useRef(createRequestGate()).current
   const alive = useRef(true)
   const tokenOf = useRef(getToken)
   tokenOf.current = getToken
 
   const run = useCallback(async (byUser: boolean) => {
-    const mine = ++seq.current
+    const mine = gate.begin()
     const token = tokenOf.current()
     setState((s) => ({ ...s, status: 'locating', byUser, token }))
     const r = await locateOnce({
       geolocation: typeof navigator !== 'undefined' ? navigator.geolocation : undefined,
       isSecureContext: typeof window !== 'undefined' ? window.isSecureContext : undefined,
     })
-    if (!alive.current || mine !== seq.current) return // a newer request owns the result
+    if (!alive.current || !gate.owns(mine)) return // a newer request owns the result
     setState({ ...r, byUser, token })
     if (r.status === 'denied') setPermission('denied')
     if (r.status === 'located') setPermission('granted')

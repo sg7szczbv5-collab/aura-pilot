@@ -106,6 +106,26 @@ export function clientPinBlock(live: boolean, zone: { restricted?: unknown; inSe
   return null
 }
 
+/**
+ * L2 — latest request wins. Each request takes a number; only the newest one may report a result,
+ * so a tap during a pending (automatic) request supersedes it and the older result is discarded.
+ */
+export function createRequestGate() {
+  let seq = 0
+  return { begin: () => ++seq, owns: (id: number) => id === seq }
+}
+
+/**
+ * L2 — may the rider tap "Use my location" now? Also while an AUTOMATIC request is pending (it may
+ * be slow; the tap supersedes it). Not while their own tap is pending, after a refusal (never
+ * prompt again), when unsupported, or when a fresh GPS pickup is already set.
+ */
+export function canRequestLocation(state: Pick<LocState, 'status' | 'byUser'>, pickupFromGps: boolean, pickupStale: boolean): boolean {
+  if (state.status === 'denied' || state.status === 'unsupported' || state.status === 'insecure') return false
+  if (state.status === 'locating') return !state.byUser
+  return !pickupFromGps || pickupStale
+}
+
 /** Should the app take a fix without a user gesture? Only when the browser already granted it. */
 export function shouldAutoLocate(permission: PermissionHint, alreadyTriedThisSession: boolean): boolean {
   return permission === 'granted' && !alreadyTriedThisSession
@@ -146,7 +166,11 @@ export function locateOnce(env: Env, options: PositionOptions = GEO_OPTIONS): Pr
           clearTimeout(backstop)
           const pos = { lat: p.coords.latitude, lng: p.coords.longitude }
           if (!Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) return finish({ status: 'unavailable' })
-          finish({ status: 'located', pos, accuracyM: p.coords.accuracy, at: env.now?.() ?? Date.now() })
+          // L1: the age of a fix is the age of the reading itself (Position.timestamp), not when it
+          // reached us: a cached position (maximumAge) can be older than the callback. A missing or
+          // non-positive timestamp falls back to now; an old or future one is judged by validatePickup.
+          const ts = typeof p.timestamp === 'number' && Number.isFinite(p.timestamp) && p.timestamp > 0 ? p.timestamp : undefined
+          finish({ status: 'located', pos, accuracyM: p.coords.accuracy, at: ts ?? env.now?.() ?? Date.now() })
         },
         (e) => {
           clearTimeout(backstop)
