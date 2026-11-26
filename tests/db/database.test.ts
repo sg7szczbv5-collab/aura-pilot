@@ -1273,3 +1273,62 @@ describe('vehicle rejection reason (vehicles.status_reason)', () => {
       .toEqual({ status: 'rejected', status_reason: 'عدم استيفاء شروط الفئة المطلوبة' })
   })
 })
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('captain resubmission: driver_save_vehicle + re-upload + submit (migration 017)', () => {
+  let cap: string
+  let vid: string
+  const nid = () => { const f = '108765432'; return f + saudiIdCheckDigit(f) }
+  const save = (who: string, id: string | null, plate = '7777', seq = '700000001', make = 'Kia') =>
+    one<{ id: string; status: string; status_reason: string | null; plate_number: string; make: string }>(who,
+      `select id, status, status_reason, plate_number, make from driver_save_vehicle($1, 'go', $2, 'K5', 2024, 'grey', 'RJT', $3, $4, 4)`,
+      [id, make, plate, seq])
+  const upload = (types: string[], vehicle: string | null) => as(cap, async (tx) => {
+    for (const t of types) await tx.query(
+      `insert into driver_documents (driver_id, vehicle_id, doc_type, storage_path, expires_at)
+       values ($1::uuid, $2::uuid, $3::document_type, $1::text || '/' || $3::text || '-' || gen_random_uuid()::text || '.jpg', $4)`,
+      [cap, vehicle, t, t === 'profile_photo' ? null : '2030-06-30'])
+  })
+
+  beforeAll(async () => {
+    cap = await newUser('966544100003', 'Resubmit Captain')
+    await acceptRequiredConsents(cap, 'driver')
+    await as(cap, (tx) => tx.query(
+      `insert into drivers (id, city_id, national_id, date_of_birth, iban)
+       values ($1, (select id from cities where code = 'riyadh'), $2, '1990-01-01', 'SA0380000000608010167519')`, [cap, nid()]))
+    vid = (await save(cap, null)).id
+    await upload(['national_id', 'driving_license', 'profile_photo'], null)
+    await upload(['vehicle_registration', 'vehicle_insurance'], vid)
+    expect((await one<{ status: string }>(cap, `select (submit_driver_application()).status`)).status).toBe('pending_review')
+  })
+
+  it('a rejected vehicle can be corrected in place (same plate) and goes back to review', async () => {
+    await one(driverManager, `select admin_review_vehicle($1, false, 'عدم تطابق البيانات')`, [vid])
+    const v = await save(cap, vid, '7777', '700000001', 'Kia ')
+    expect(v).toMatchObject({ id: vid, status: 'pending_review', status_reason: null, make: 'Kia' })
+    expect((await one<{ current_vehicle_id: string }>(cap, `select current_vehicle_id from drivers where id = $1`, [cap])).current_vehicle_id).toBe(vid)
+  })
+
+  it('another captain cannot edit it; an approved vehicle cannot be edited', async () => {
+    await expect(save(driver, vid)).rejects.toThrow(/approved captains|not found/)
+    await one(driverManager, `select admin_review_document(id, true) from driver_documents where vehicle_id = $1`, [vid])
+    await one(driverManager, `select admin_review_vehicle($1, true)`, [vid])
+    await expect(save(cap, vid)).rejects.toThrow(/can no longer be edited/)
+  })
+
+  it('rejected application: register another vehicle, re-upload a rejected document, resubmit', async () => {
+    const lic = await one<{ id: string }>(cap, `select id from driver_documents where driver_id = $1 and doc_type = 'driving_license'`, [cap])
+    await one(driverManager, `select admin_review_document($1, false, 'عدم وضوح الوثيقة أو رداءة التصوير')`, [lic.id])
+    await one(driverManager, `select admin_set_driver_status($1, 'rejected', 'نقص في المرفقات أو البيانات المطلوبة')`, [cap])
+
+    await expect(save(cap, null, '7777', '700000009')).rejects.toThrow(/already registered/) // same plate as the first vehicle
+    const v2 = await save(cap, null, '8888', '700000002')
+    expect(v2.status).toBe('pending_review')
+    await expect(one(cap, `select submit_driver_application()`)).rejects.toThrow(/missing documents/)
+    await upload(['driving_license'], null)
+    await upload(['vehicle_registration', 'vehicle_insurance'], v2.id)
+    const d = await one<{ status: string; status_reason: string | null; current_vehicle_id: string }>(cap,
+      `select status, status_reason, current_vehicle_id from submit_driver_application()`)
+    expect(d).toEqual({ status: 'pending_review', status_reason: null, current_vehicle_id: v2.id })
+  })
+})

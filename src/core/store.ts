@@ -731,15 +731,34 @@ export const actions = {
   },
 
   /**
-   * Demo: a rejected captain withdraws the application to submit a corrected one.
-   * Removes the captain and the vehicle so the same phone number can register again.
+   * Demo: a captain fixes a rejected / incomplete application — re-uploads the listed
+   * documents, corrects the current vehicle or adds another one — and it goes back to review.
    */
-  withdrawDriverApplication(driverId: string) {
+  resubmitDriverApplication(
+    driverId: string,
+    input: { mode: 'keep' | 'edit' | 'new'; vehicle?: Omit<Vehicle, 'id' | 'status' | 'driverId'>; docs: Partial<Record<DriverDoc['id'], string>> },
+  ) {
     store.commit((s) => {
       const d = s.drivers.find((x) => x.id === driverId)
-      if (!d || (d.status !== 'rejected' && d.status !== 'incomplete')) return
-      s.drivers = s.drivers.filter((x) => x.id !== driverId)
-      s.vehicles = s.vehicles.filter((v) => v.driverId !== driverId && v.id !== d.vehicleId)
+      if (!d || d.status === 'approved' || d.status === 'suspended') return
+      if (input.mode === 'edit' && input.vehicle) {
+        const v = s.vehicles.find((x) => x.id === d.vehicleId)
+        if (v) Object.assign(v, input.vehicle)
+      } else if (input.mode === 'new' && input.vehicle) {
+        const vid = `veh-${String(s.vehicles.length + 1).padStart(3, '0')}-${Date.now().toString(36)}`
+        s.vehicles.push({ ...input.vehicle, id: vid, status: 'active', driverId })
+        d.vehicleId = vid
+      }
+      if (input.mode !== 'keep' && d.vehicleReview) d.vehicleReview = { status: 'pending_review' }
+      for (const [id, fileName] of Object.entries(input.docs) as [DriverDoc['id'], string][]) {
+        const i = d.docs.findIndex((x) => x.id === id)
+        const doc: DriverDoc = { id, status: 'uploaded', fileName }
+        if (i >= 0) d.docs[i] = doc
+        else d.docs.push(doc)
+      }
+      if (d.status === 'rejected' || d.status === 'incomplete') d.status = 'pending_review'
+      d.rejectionReason = undefined
+      audit(s, { actor: d.name.en || d.name.ar, role: 'driver', action: 'driver.resubmit', target: driverId })
     })
   },
 

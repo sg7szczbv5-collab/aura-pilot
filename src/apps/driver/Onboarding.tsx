@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Camera, Car, Check, Clock, FileCheck2, FileUp, ShieldCheck, X, XCircle } from 'lucide-react'
+import { Camera, Car, Check, Clock, ShieldCheck, X, XCircle } from 'lucide-react'
 import { Wordmark } from '../../ds/Logo'
 import { Button, cx, Field, ICON, Input, OtpInput, PhoneInput, Select, SuccessMark, validSaudiMobile } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
@@ -15,6 +15,8 @@ import { CITIES } from '../../core/geo'
 import { VEHICLE_CLASSES } from '../../core/pricing'
 import type { CityId, DriverDoc, VehicleClassId } from '../../core/types'
 import { TopBar, screenMotion } from '../shared/mobile'
+import { ExpiryField, LATIN_TO_AR, UploadTile, onboardingErrorText } from './formParts'
+import { Resubmit } from './Resubmit'
 import { showVehicleRejectedScreen, vehicleRejection } from './vehicleRejection'
 
 export function DriverSplash({ onDone }: { onDone: () => void }) {
@@ -43,10 +45,10 @@ const STEPS: Step[] = ['personal', 'id_docs', 'vehicle', 'vehicle_docs']
 const DEMO_CODE = auth.demoCode('driver')
 
 /** Login + 4-step captain application. Demo: 55 123 4567 signs in as the approved captain. */
-export function DriverAuth({ onAuthed, reapplyPhone }: { onAuthed: (id: string) => void; /** Demo re-application: skip sign-in and reuse this 9-digit number. */ reapplyPhone?: string }) {
+export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
   const { t, lang } = useI18n()
-  const [step, setStep] = useState<Step>(reapplyPhone ? 'personal' : 'phone')
-  const [phone, setPhone] = useState(reapplyPhone ?? '551234567')
+  const [step, setStep] = useState<Step>('phone')
+  const [phone, setPhone] = useState('551234567')
   const [code, setCode] = useState('')
   const [err, setErr] = useState(false)
   const [errText, setErrText] = useState('')
@@ -411,59 +413,6 @@ export function DriverAuth({ onAuthed, reapplyPhone }: { onAuthed: (id: string) 
   )
 }
 
-function ExpiryField({ value, onChange, min }: { value?: string; onChange: (v: string) => void; min: string }) {
-  const { t } = useI18n()
-  return (
-    <Field label={t('تاريخ الانتهاء', 'Expiry date')} error={value && value < min ? t('الوثيقة منتهية', 'Document has expired') : undefined}>
-      <Input type="date" dir="ltr" value={value ?? ''} min={min} onChange={(e) => onChange(e.target.value)} />
-    </Field>
-  )
-}
-
-function onboardingErrorText(e: string, t: (ar: string, en: string) => string): string {
-  if (e.includes('national ID')) return t('رقم الهوية غير صحيح', 'The ID number is not valid')
-  if (e.includes('IBAN')) return t('الآيبان غير صحيح', 'The IBAN is not valid')
-  if (e.includes('older than')) return t('المركبة أقدم من المسموح', 'The vehicle is older than allowed')
-  if (e.includes('expiry')) return t('تحقق من تواريخ انتهاء الوثائق', 'Check the document expiry dates')
-  if (e.includes('duplicate') || e.includes('unique')) return t('اللوحة أو الرقم التسلسلي أو رقم الهوية مسجّل مسبقاً', 'The plate, sequence number or ID is already registered')
-  if (e.startsWith('invalid:')) return t('بعض البيانات ناقصة أو غير صحيحة', 'Some details are missing or invalid')
-  return t('تعذّر إرسال الطلب، حاول مرة أخرى', 'Could not submit the application, please try again')
-}
-
-const LATIN_TO_AR: Record<string, string> = { A: 'أ', B: 'ب', J: 'ح', D: 'د', R: 'ر', S: 'س', X: 'ص', T: 'ط', E: 'ع', G: 'ق', K: 'ك', L: 'ل', Z: 'م', N: 'ن', H: 'ه', U: 'و', V: 'ى' }
-
-function UploadTile({ label, file, onFile, icon }: { label: string; file?: string; onFile: (name: string | undefined, file?: File) => void; icon?: React.ReactNode }) {
-  const { t } = useI18n()
-  const ref = useRef<HTMLInputElement>(null)
-  return (
-    <div className={cx('flex items-center gap-3 rounded-2xl p-3.5', file ? 'bg-go/10 ring-1 ring-go/40' : 'bg-ink-2 ring-1 ring-white/8')}>
-      <span className={cx('flex size-11 items-center justify-center rounded-xl', file ? 'bg-go text-ink' : 'bg-ink-3')}>{file ? <FileCheck2 size={20} {...ICON} /> : (icon ?? <FileUp size={20} {...ICON} />)}</span>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">{label}</p>
-        <p className="truncate text-xs text-white/50">{file ?? t('لم يتم الرفع', 'Not uploaded')}</p>
-      </div>
-      {file ? (
-        <button aria-label={t('إزالة', 'Remove')} onClick={() => onFile(undefined)} className="text-white/60">
-          <X size={18} />
-        </button>
-      ) : (
-        <Button size="sm" variant="primary" onClick={() => ref.current?.click()}>
-          {t('رفع', 'Upload')}
-        </Button>
-      )}
-      <input
-        ref={ref}
-        type="file"
-        accept="image/*,application/pdf"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          if (f) onFile(f.name, f)
-        }}
-      />
-    </div>
-  )
-}
 
 /** «لم يتم قبول الطلب»: the reason(s) in a card, or a default explanation, plus re-apply / log out. */
 function RejectedScreen({ tag, reasons, fallback, onReapply, onLogout }: { tag?: React.ReactNode; reasons: string[]; fallback: string; onReapply?: () => void; onLogout: () => void }) {
@@ -487,7 +436,7 @@ function RejectedScreen({ tag, reasons, fallback, onReapply, onLogout }: { tag?:
       </div>
       {onReapply && (
         <Button variant="go" size="lg" full className="mt-8" onClick={onReapply}>
-          {t('تعديل الطلب وإعادة التقديم', 'Edit and re-apply')}
+          {t('إعادة رفع المستندات أو تغيير المركبة', 'Re-upload documents or change vehicle')}
         </Button>
       )}
       <Button variant="secondary" size="lg" full className={onReapply ? 'mt-3' : 'mt-8'} onClick={onLogout}>
@@ -498,11 +447,14 @@ function RejectedScreen({ tag, reasons, fallback, onReapply, onLogout }: { tag?:
 }
 
 /** Live application status (updates the moment Admin approves or rejects). */
-export function ApplicationStatus({ driverId, onApproved, onLogout, onReapply }: { driverId: string; onApproved: () => void; onLogout: () => void; onReapply?: () => void }) {
+export function ApplicationStatus({ driverId, onApproved, onLogout }: { driverId: string; onApproved: () => void; onLogout: () => void }) {
   const { t, L } = useI18n()
   useEco((s) => s.rev)
+  const [fixing, setFixing] = useState(false)
   const d = getDriver(driverId)
   if (!d) return null
+  if (fixing && d.status !== 'approved' && d.status !== 'suspended') return <Resubmit driverId={d.id} onDone={() => setFixing(false)} onCancel={() => setFixing(false)} />
+  const onReapply = () => setFixing(true)
   const docLabel: Record<DriverDoc['id'], string> = {
     national_id: t('الهوية', 'National ID'),
     license: t('رخصة القيادة', 'Licence'),
@@ -597,7 +549,12 @@ export function ApplicationStatus({ driverId, onApproved, onLogout, onReapply }:
           </div>
         )}
       </div>
-      <div className="px-5 pt-3" style={{ paddingBottom: 'calc(var(--safe-bottom) + 10px)' }}>
+      <div className="space-y-2 px-5 pt-3" style={{ paddingBottom: 'calc(var(--safe-bottom) + 10px)' }}>
+        {d.status === 'pending_review' && d.docs.some((x) => x.status === 'rejected' || x.status === 'missing') && (
+          <Button variant="go" size="lg" full onClick={onReapply}>
+            {t('إعادة رفع المستندات المرفوضة أو الناقصة', 'Re-upload rejected or missing documents')}
+          </Button>
+        )}
         <Button variant="secondary" size="lg" full onClick={onLogout}>
           {t('تسجيل الخروج', 'Log out')}
         </Button>
