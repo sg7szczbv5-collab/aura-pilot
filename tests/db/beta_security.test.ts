@@ -1079,3 +1079,81 @@ describe('F2 (migration 023) · a token issued before the block is refused at th
     expect(b.r.failures).toContain('blocked_check_missing:rate_ride')
   })
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// Migration 024 — Storage closed to blocked accounts; backend identity for BETA builds
+// ════════════════════════════════════════════════════════════════════════════
+describe('Storage (migration 024): a blocked account cannot upload, replace, delete or browse files', () => {
+  let active: string, blockedU: string, staff: string
+  const put = (who: string, bucket: string, path: string) => attempt(who, `insert into storage.objects (bucket_id, name) values ($1, $2)`, [bucket, path])
+  beforeAll(async () => {
+    active = await newUser('966558000001')
+    blockedU = await newUser('966558000002')
+    staff = await newUser('966558000003')
+    await db.query(`select private.grant_admin($1, 'driver_manager')`, [staff])
+    MFA.add(staff)
+    // Files that already exist (uploaded before the block).
+    await db.query(`insert into storage.objects (bucket_id, name, owner) values
+      ('driver-documents', $1 || '/national_id.jpg', $1::uuid), ('avatars', $1 || '/me.png', $1::uuid),
+      ('driver-documents', $2 || '/national_id.jpg', $2::uuid), ('avatars', $2 || '/me.png', $2::uuid)`, [active, blockedU])
+    await db.query(`select ops_guard.revoke_tester('966558000002')`)
+  })
+
+  it('the four restrictive policies exist next to the permissive ones of migration 009', async () => {
+    const r = await db.query<{ policyname: string; permissive: string; cmd: string }>(
+      `select policyname, permissive, cmd from pg_policies where schemaname = 'storage' and tablename = 'objects' order by policyname`)
+    expect(r.rows.filter((x) => x.permissive === 'RESTRICTIVE').map((x) => `${x.policyname}:${x.cmd}`)).toEqual([
+      'aura_blocked_no_delete:DELETE', 'aura_blocked_no_update:UPDATE', 'aura_blocked_no_upload:INSERT', 'aura_blocked_own_files_only:SELECT'])
+    expect(r.rows.filter((x) => x.permissive === 'PERMISSIVE').length).toBe(5)
+  })
+
+  it('an active user: uploads to the own folder only, replaces the own avatar, reads every avatar', async () => {
+    expect(await put(active, 'driver-documents', `${active}/licence.jpg`)).toBe('ok')
+    expect(await put(active, 'driver-documents', `${blockedU}/forged.jpg`)).toMatch(/row-level security|permission/)
+    expect(await attempt(active, `update storage.objects set metadata = '{}' where name = $1`, [`${active}/me.png`])).toBe('ok')
+    expect((await peek<{ n: number }>(active, `select count(*)::int n from storage.objects where bucket_id = 'avatars'`)).n).toBe(2)
+  })
+
+  it('a blocked user (old token): no upload, no avatar replacement, no delete — in either bucket', async () => {
+    expect(await put(blockedU, 'driver-documents', `${blockedU}/licence.jpg`)).toMatch(/row-level security/)
+    expect(await put(blockedU, 'avatars', `${blockedU}/new.png`)).toMatch(/row-level security/)
+    const upd = await peek<{ n: number }>(blockedU, `with u as (update storage.objects set metadata = '{"x":1}' where name = $1 returning 1) select count(*)::int n from u`, [`${blockedU}/me.png`])
+    expect(upd.n).toBe(0)
+    const del = await peek<{ n: number }>(blockedU, `with d as (delete from storage.objects where name like $1 returning 1) select count(*)::int n from d`, [`${blockedU}/%`])
+    expect(del.n).toBe(0)
+  })
+
+  it('a blocked user still downloads their own files (PDPL access) but nobody else’s', async () => {
+    const own = await peek<{ n: number }>(blockedU, `select count(*)::int n from storage.objects where (storage.foldername(name))[1] = $1`, [blockedU])
+    expect(own.n).toBe(2)
+    const others = await peek<{ n: number }>(blockedU, `select count(*)::int n from storage.objects where (storage.foldername(name))[1] <> $1`, [blockedU])
+    expect(others.n).toBe(0)
+  })
+
+  it('staff with drivers.view read documents; once blocked, they read nothing beyond their own folder', async () => {
+    expect((await peek<{ n: number }>(staff, `select count(*)::int n from storage.objects where bucket_id = 'driver-documents'`)).n).toBeGreaterThanOrEqual(2)
+    await db.query(`select ops_guard.revoke_tester('966558000003')`)
+    expect((await peek<{ n: number }>(staff, `select count(*)::int n from storage.objects where bucket_id = 'driver-documents'`)).n).toBe(0)
+  })
+
+  it('the integrity check notices a missing Storage policy', async () => {
+    const r = await peek<{ r: { failures: string[] } }>('owner', `select ops_guard.integrity_check() r`, [], [`drop policy "aura_blocked_no_upload" on storage.objects`])
+    expect(r.r.failures).toContain('storage_policy_missing:aura_blocked_no_upload')
+    expect((await db.query<{ r: { ok: boolean } }>(`select ops_guard.integrity_check() r`)).rows[0].r.ok).toBe(true)
+  })
+})
+
+describe('public.my_environment (migration 024): a BETA build can tell which backend it is on', () => {
+  it('signed-in users get "beta" here; anon and service_role cannot call it', async () => {
+    const u = await newUser('966558100001')
+    expect((await peek<{ m: string }>(u, `select public.my_environment() m`)).m).toBe('beta')
+    expect(await attempt('anon', `select public.my_environment()`)).toBe('permission_denied')
+    expect(await attempt('service', `select public.my_environment()`)).toBe('permission_denied')
+  })
+  it('no / corrupt marker or a production marker → not "beta" (the app signs out and stops)', async () => {
+    const u = await newUser('966558100002')
+    expect((await peek<{ m: string | null }>(u, `select public.my_environment() m`, [], MARKER_MISSING)).m).toBeNull()
+    expect((await peek<{ m: string | null }>(u, `select public.my_environment() m`, [], MARKER_CORRUPT)).m).toBeNull()
+    expect((await peek<{ m: string | null }>(u, `select public.my_environment() m`, [], PRODUCTION)).m).toBe('production')
+  })
+})

@@ -107,8 +107,8 @@ describe('build-time check (vite.config.ts)', () => {
   it('both build configs (app and single-file share) apply the same check', () => {
     for (const f of ['vite.config.ts', 'vite.share.config.ts']) {
       const src = readFileSync(join(ROOT, f), 'utf8')
-      expect(src, f).toMatch(/buildPaymentViolations\(/)
-      expect(src, f).toMatch(/throw new Error\(`AURA: payment gateways are not allowed/)
+      expect(src, f).toMatch(/buildEnvironmentViolations\(/)
+      expect(src, f).toMatch(/throw new Error\(`AURA: unsafe build configuration/)
       expect(src, f).toMatch(/VITE_AURA_PAYMENTS_MOCK_ONLY/)
     }
   })
@@ -118,7 +118,7 @@ describe('build-time check (vite.config.ts)', () => {
       env: { ...process.env, VITE_APP_ENV: 'staging', VITE_MOYASAR_PUBLISHABLE_KEY: KEY },
     })
     expect(r.status).not.toBe(0)
-    expect(`${r.stdout}${r.stderr}`).toMatch(/payment gateways are not allowed in a mock-only .* VITE_MOYASAR_PUBLISHABLE_KEY is set/)
+    expect(`${r.stdout}${r.stderr}`).toMatch(/unsafe build configuration .* VITE_MOYASAR_PUBLISHABLE_KEY is set/)
   }, 60_000)
 })
 
@@ -128,7 +128,7 @@ describe('preflight and the Edge runtime guard enforce the same server-side list
   })
   it('each setting is a staging blocker and a runtime refusal', () => {
     const BETA = 'betabetabetabetabeta'
-    const base = { APP_ENV: 'staging', VITE_SUPABASE_URL: `https://${BETA}.supabase.co`, SUPABASE_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon',
+    const base = { APP_ENV: 'staging', VITE_SUPABASE_URL: `https://${BETA}.supabase.co`, SUPABASE_PROJECT_REF: BETA, BETA_PROJECT_REF: BETA, VITE_SUPABASE_ANON_KEY: 'anon',
       PAYMENTS_CRON_SECRET: 'a'.repeat(40), WASL_CRON_SECRET: 'b'.repeat(40), PRIVACY_CRON_SECRET: 'c'.repeat(40), HEALTH_SECRET: 'd'.repeat(40) }
     const cfg: RuntimeConfig = { marker_state: 'ok', mode: 'beta', project_ref: BETA, prod_project_ref: null, live_allowed: false, integrity_ok: true, integrity_checked_at: new Date().toISOString() }
     for (const k of GATEWAY_SETTINGS) {

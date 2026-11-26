@@ -121,6 +121,8 @@ export function checkConfig(env: Env, target: Target, prodRef: string | null = P
   if (target === 'staging') {
     const sk = env.MOYASAR_SECRET_KEY ?? ''
     const pk = env.VITE_MOYASAR_PUBLISHABLE_KEY ?? ''
+    add('beta_project_declared', 'beta', 'blocker', !!urlRef && (env.BETA_PROJECT_REF ?? '').trim() === urlRef,
+      'BETA_PROJECT_REF declares the BETA project and VITE_SUPABASE_URL points to it (the build enforces the same)')
     add('beta_not_production_project', 'beta', 'blocker', !!urlRef && urlRef !== prodRef && linkRef !== prodRef && (prodRef === null || ![urlRef, linkRef].includes(prodRef)),
       'The BETA project is not the production project')
     add('beta_payments_mock', 'beta', 'blocker', provider === 'mock' && (env.VITE_PAYMENT_PROVIDER ?? 'mock') === 'mock', `BETA payments must be mock (PAYMENT_PROVIDER=${provider}, VITE_PAYMENT_PROVIDER=${env.VITE_PAYMENT_PROVIDER ?? 'mock'})`)

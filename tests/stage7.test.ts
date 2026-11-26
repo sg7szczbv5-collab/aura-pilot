@@ -74,7 +74,7 @@ describe('production configuration checks', () => {
     expect(failing({ ...PROD, PAYMENT_CALLBACK_URL: 'http://localhost:5180/#/passenger' })).toEqual(['payment_callback'])
     // staging is the closed BETA (migration 021): mock providers only, no Elm credentials.
     const { WASL_APP_ID: _a, WASL_APP_KEY: _k, ...noWasl } = PROD
-    const staging = { ...noWasl, APP_ENV: 'staging', VITE_SUPABASE_URL: 'https://betabetabetabetabeta.supabase.co', MOYASAR_SECRET_KEY: 'sk_test_abc', VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_test_abc', WASL_MODE: 'mock' }
+    const staging = { ...noWasl, APP_ENV: 'staging', VITE_SUPABASE_URL: 'https://betabetabetabetabeta.supabase.co', BETA_PROJECT_REF: 'betabetabetabetabeta', MOYASAR_SECRET_KEY: 'sk_test_abc', VITE_MOYASAR_PUBLISHABLE_KEY: 'pk_test_abc', WASL_MODE: 'mock' }
     expect(failing(staging, 'staging')).toEqual(['beta_payments_mock', 'beta_no_provider_credentials'])
     const { MOYASAR_SECRET_KEY: _s, VITE_MOYASAR_PUBLISHABLE_KEY: _p, MOYASAR_WEBHOOK_SECRET: _w, ...noMoyasar } = staging
     expect(failing({ ...noMoyasar, PAYMENT_PROVIDER: 'mock', VITE_PAYMENT_PROVIDER: 'mock' }, 'staging')).toEqual([])
