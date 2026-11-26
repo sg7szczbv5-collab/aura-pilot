@@ -18,6 +18,7 @@ import { ExpiryField, LATIN_TO_AR, UploadTile, onboardingErrorText } from './for
 import { Resubmit } from './Resubmit'
 import { VehicleForm } from './VehicleForm'
 import { VEHICLE_COLORS, colorById } from '../../data/vehicleCatalog'
+import { classifyVehicle } from '../../data/vehicleClassRules'
 import type { VehicleFields } from '../../captain/resubmit'
 import { showVehicleRejectedScreen, vehicleRejection } from './vehicleRejection'
 
@@ -131,6 +132,7 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
   const vehicleOk = live
     ? vehicleAgeOk(veh.year) && isValidPlate(veh.plateLetters.toUpperCase(), veh.plateDigits) && isValidSequenceNumber(veh.sequenceNumber)
     : vehicleAgeOk(veh.year) && veh.plateDigits.length >= 3 && veh.plateLetters.length >= 2
+  const classOk = classifyVehicle(veh).eligible.includes(veh.classId as VehicleClassId)
 
   const submitLive = async () => {
     const uid = getSession().driverAuthId
@@ -351,7 +353,7 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
                 </Button>
               )}
               {step === 'vehicle' && (
-                <Button variant="go" size="xl" full disabled={!veh.make || !veh.model || !vehicleOk} onClick={() => setStep('vehicle_docs')}>
+                <Button variant="go" size="xl" full disabled={!veh.make.trim() || !veh.model.trim() || !vehicleOk || !classOk} onClick={() => setStep('vehicle_docs')}>
                   {t('التالي', 'Next')}
                 </Button>
               )}

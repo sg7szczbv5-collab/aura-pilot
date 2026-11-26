@@ -8,7 +8,8 @@
  */
 import { getSupabase } from '../auth/supabaseClient'
 import { isValidPlate, isValidSequenceNumber, vehicleAgeOk } from '../compliance/validators'
-import type { DriverDoc } from '../core/types'
+import type { DriverDoc, VehicleClassId } from '../core/types'
+import { classifyVehicle } from '../data/vehicleClassRules'
 import { ALLOWED_TYPES, DOC_TYPE, MAX_FILE_BYTES, NEEDS_EXPIRY, VEHICLE_DOCS, storagePath, type DocKey, type OnboardingInput } from './onboarding'
 
 export type VehicleMode = 'keep' | 'edit' | 'new'
@@ -39,7 +40,7 @@ export type ResubmitInput = {
   docs: Partial<Record<DocKey, { file: File; expiresAt?: string }>>
 }
 
-export type ResubmitField = 'nothing' | 'vehicle' | 'vehicleYear' | 'plate' | 'sequenceNumber' | `doc:${DocKey}` | `expiry:${DocKey}`
+export type ResubmitField = 'nothing' | 'vehicle' | 'vehicleClass' | 'vehicleYear' | 'plate' | 'sequenceNumber' | `doc:${DocKey}` | `expiry:${DocKey}`
 
 export function validateResubmit(i: Omit<ResubmitInput, 'uid'>, opts: { live: boolean; now?: Date }): { ok: true } | { ok: false; field: ResubmitField } {
   const now = opts.now ?? new Date()
@@ -50,6 +51,7 @@ export function validateResubmit(i: Omit<ResubmitInput, 'uid'>, opts: { live: bo
     if (!vehicleAgeOk(v.year, now)) return { ok: false, field: 'vehicleYear' }
     if (opts.live ? !isValidPlate(v.plateLetters.toUpperCase(), v.plateDigits) : v.plateDigits.length < 3 || v.plateLetters.length < 2) return { ok: false, field: 'plate' }
     if (opts.live && !isValidSequenceNumber(v.sequenceNumber)) return { ok: false, field: 'sequenceNumber' }
+    if (!classifyVehicle(v, now).eligible.includes(v.classId as VehicleClassId)) return { ok: false, field: 'vehicleClass' }
   }
   const today = now.toISOString().slice(0, 10)
   for (const k of i.required) {

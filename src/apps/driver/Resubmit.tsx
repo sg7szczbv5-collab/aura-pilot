@@ -134,6 +134,8 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
         ? t('أدخل الشركة والطراز', 'Enter the make and model')
         : f === 'vehicleYear'
           ? t(`لا يزيد عمر المركبة عن ${VEHICLE_MAX_AGE_YEARS} سنوات`, `At most ${VEHICLE_MAX_AGE_YEARS} years old`)
+          : f === 'vehicleClass'
+            ? t('الفئة المختارة لا تناسب هذه المركبة', 'The selected class does not fit this vehicle')
           : f === 'plate'
             ? t('تحقق من أرقام وحروف اللوحة', 'Check the plate digits and letters')
             : f === 'sequenceNumber'

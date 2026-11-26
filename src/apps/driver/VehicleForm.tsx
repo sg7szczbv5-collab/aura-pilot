@@ -1,8 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Field, Input, Select, cx } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
 import { VEHICLE_MAX_AGE_YEARS, isValidSequenceNumber } from '../../compliance/validators'
 import { VEHICLE_CLASSES } from '../../core/pricing'
+import type { VehicleClassId } from '../../core/types'
+import { BLACK_MAX_AGE, COMFORT_MAX_AGE, classifyVehicle } from '../../data/vehicleClassRules'
+import { PlateInput } from './PlateInput'
 import type { VehicleFields } from '../../captain/resubmit'
 import { MAKES, OTHER, VEHICLE_COLORS, colorHex, findMake, vehicleYears } from '../../data/vehicleCatalog'
 
@@ -109,12 +112,9 @@ export function VehicleForm({ value, onChange, live }: { value: VehicleFields; o
         </div>
       </Field>
 
-      <Field label={t('أرقام اللوحة', 'Plate digits')}>
-        <Input value={value.plateDigits} inputMode="numeric" className="num" dir="ltr" placeholder="1234" onChange={(e) => set({ plateDigits: e.target.value.replace(/\D/g, '').slice(0, 4) })} />
-      </Field>
-      <Field label={t('حروف اللوحة (EN)', 'Plate letters')}>
-        <Input value={value.plateLetters} className="num uppercase" dir="ltr" placeholder="RHB" onChange={(e) => set({ plateLetters: e.target.value.replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase() })} />
-      </Field>
+      <div className="col-span-2">
+        <PlateInput digits={value.plateDigits} letters={value.plateLetters} onChange={(p) => set({ plateDigits: p.digits, plateLetters: p.letters })} />
+      </div>
       {live && (
         <Field label={t('الرقم التسلسلي (الاستمارة)', 'Sequence no. (Istimara)')} className="col-span-2" error={value.sequenceNumber && !isValidSequenceNumber(value.sequenceNumber) ? t('٦–١٢ رقماً', '6–12 digits') : undefined}>
           <Input value={value.sequenceNumber} inputMode="numeric" className="num" dir="ltr" onChange={(e) => set({ sequenceNumber: e.target.value.replace(/\D/g, '').slice(0, 12) })} />
@@ -122,14 +122,72 @@ export function VehicleForm({ value, onChange, live }: { value: VehicleFields; o
       )}
 
       <div className="col-span-2">
-        <p className="mb-2 text-[13px] font-medium text-white/70">{t('الفئة المطلوبة', 'Requested class')}</p>
-        <div className="grid grid-cols-2 gap-2">
-          {VEHICLE_CLASSES.map((c) => (
-            <button key={c.id} type="button" onClick={() => set({ classId: c.id, seats: c.id === 'xl' ? 7 : 4 })} className={cx('rounded-xl px-3 py-2.5 text-start text-sm font-semibold', value.classId === c.id ? 'bg-go text-ink' : 'bg-ink-3')} dir="ltr">
-              {c.name}
+        <ClassPicker value={value} onChange={(c) => set({ classId: c, seats: c === 'xl' ? 7 : 4 })} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Class chosen automatically from make / model / year / colour (see vehicleClassRules):
+ * the qualifying class is selected; others are shown with the reason they do not apply.
+ */
+function ClassPicker({ value, onChange }: { value: VehicleFields; onChange: (c: VehicleClassId) => void }) {
+  const { t } = useI18n()
+  const ready = !!value.make.trim() && !!value.model.trim() && !!value.year
+  const c = classifyVehicle(value)
+  // Pick the class automatically whenever the vehicle changes. On first render keep a saved
+  // class that still applies (e.g. a Yukon saved as XL), otherwise use the computed one.
+  const first = useRef(true)
+  useEffect(() => {
+    if (!ready) return
+    const keep = first.current && c.eligible.includes(value.classId as VehicleClassId)
+    first.current = false
+    if (!keep && value.classId !== c.primary) onChange(c.primary)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, value.make, value.model, value.year, value.color])
+
+  const why = (id: VehicleClassId) => {
+    const k = c.checks[id]
+    if (k.ok) return c.eligible.includes(id) ? undefined : t('تغطيها فئة مركبتك الأعلى', 'Covered by your higher class')
+    if (k.why === 'seats') return t('للمركبات ٧ مقاعد', '7-seat vehicles only')
+    if (k.why === 'colour') return t('تتطلب لوناً أسود', 'Requires a black exterior')
+    if (k.why === 'age') return id === 'black' ? t(`حتى ${BLACK_MAX_AGE} سنوات`, `Up to ${BLACK_MAX_AGE} years old`) : t(`حتى ${COMFORT_MAX_AGE} سنوات`, `Up to ${COMFORT_MAX_AGE} years old`)
+    return id === 'black' ? t('للطرازات الفاخرة', 'Luxury models only') : t('للطرازات المتوسطة والفاخرة', 'Mid-size and premium models')
+  }
+
+  return (
+    <div>
+      <p className="mb-1 text-[13px] font-medium text-white/70">{t('الفئة', 'Class')}</p>
+      <p className="mb-2 text-[11.5px] text-white/45">
+        {!ready
+          ? t('تُحدَّد الفئة تلقائياً بعد اختيار الشركة والطراز والسنة.', 'The class is set automatically once make, model and year are chosen.')
+          : c.unlisted
+            ? t('مركبة غير مدرجة: اختر الفئة المناسبة وسيتحقق منها فريق المراجعة.', 'Unlisted vehicle: pick the class; the review team will confirm it.')
+            : c.eligible.length > 1
+              ? t('مركبتك مؤهلة لأكثر من فئة، اختر واحدة.', 'Your vehicle qualifies for more than one class; pick one.')
+              : t('حُدِّدت الفئة تلقائياً حسب طراز المركبة وسنتها ولونها.', 'Set automatically from the model, year and colour.')}
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {VEHICLE_CLASSES.map((k) => {
+          const enabled = ready && c.eligible.includes(k.id)
+          const selected = ready && value.classId === k.id
+          return (
+            <button
+              key={k.id}
+              type="button"
+              disabled={!enabled}
+              aria-pressed={selected}
+              onClick={() => onChange(k.id)}
+              className={cx('rounded-xl px-3 py-2.5 text-start transition', selected ? 'bg-go text-ink' : enabled ? 'bg-ink-3 text-white' : 'bg-ink-2 text-white/35')}
+            >
+              <span className="block text-sm font-semibold" dir="ltr" style={{ textAlign: 'start' }}>
+                {k.name}
+              </span>
+              <span className={cx('block text-[11px]', selected ? 'text-ink/70' : 'text-white/40')}>{ready ? (why(k.id) ?? (selected ? t('الفئة المختارة', 'Selected') : '')) : '—'}</span>
             </button>
-          ))}
-        </div>
+          )
+        })}
       </div>
     </div>
   )

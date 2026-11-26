@@ -6,7 +6,7 @@ import type { DriverDoc } from '../src/core/types'
 const docs = (over: Partial<Record<DriverDoc['id'], DriverDoc['status']>> = {}): DriverDoc[] =>
   (['national_id', 'license', 'photo', 'registration', 'insurance'] as const).map((id) => ({ id, status: over[id] ?? 'approved' }))
 const file = (name = 'a.jpg', type = 'image/jpeg') => new File(['x'], name, { type })
-const VEH = { classId: 'go', make: 'Kia', model: 'K5', year: new Date().getFullYear(), color: 'grey', plateLetters: 'RJT', plateDigits: '1234', sequenceNumber: '123456789', seats: 4 }
+const VEH = { classId: 'comfort', make: 'Kia', model: 'K5', year: new Date().getFullYear(), color: 'grey', plateLetters: 'RJT', plateDigits: '1234', sequenceNumber: '123456789', seats: 4 }
 
 describe('docsToResubmit', () => {
   it('only rejected / missing documents for the same vehicle', () => {
@@ -33,6 +33,7 @@ describe('validateResubmit', () => {
     expect(validateResubmit({ ...base, mode: 'edit', required: [], docs: {}, vehicle: VEH }, { live: true })).toEqual({ ok: true })
     expect(validateResubmit({ ...base, mode: 'new', required: [], docs: {}, vehicle: { ...VEH, plateDigits: '' } }, { live: true })).toEqual({ ok: false, field: 'plate' })
     expect(validateResubmit({ ...base, mode: 'new', required: [], docs: {}, vehicle: { ...VEH, sequenceNumber: '12' } }, { live: true })).toEqual({ ok: false, field: 'sequenceNumber' })
+    expect(validateResubmit({ ...base, mode: 'new', required: [], docs: {}, vehicle: { ...VEH, classId: 'black' } }, { live: true })).toEqual({ ok: false, field: 'vehicleClass' })
   })
 })
 
