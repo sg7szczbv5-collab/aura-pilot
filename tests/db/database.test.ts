@@ -1424,6 +1424,17 @@ describe('BETA: concurrency, isolation and failure cases', () => {
     await one(riderX, `select transition_ride($1, 'cancelled', 'cleanup')`, [again.id])
   })
 
+  it('admin cancellation (live Trips page): needs trips.cancel + MFA, recorded as admin', async () => {
+    const ops = await newAdmin('966545200001', 'operations_manager')
+    const r3 = (await request(riderX)).id
+    await expect(one(support, `select transition_ride($1, 'cancelled', 'x')`, [r3])).rejects.toThrow(/not allowed/)
+    await expect(as(ops, (tx) => tx.query(`select transition_ride($1, 'cancelled', 'x')`, [r3]), { aal: 'aal1' })).rejects.toThrow(/not allowed/)
+    await one(ops, `select transition_ride($1, 'cancelled', 'عدم استيفاء شروط الفئة المطلوبة')`, [r3])
+    const r = await one<{ status: string; cancelled_by: string; cancellation_reason: string }>('service', `select status, cancelled_by, cancellation_reason from rides where id = $1`, [r3])
+    expect(r).toEqual({ status: 'cancelled', cancelled_by: 'admin', cancellation_reason: 'عدم استيفاء شروط الفئة المطلوبة' })
+    expect((await rows<{ actor: string }>(riderX, `select actor from ride_events where ride_id = $1 and to_status = 'cancelled'`, [r3]))[0].actor).toBe('admin')
+  })
+
   it('a late accept after the offer expired is refused and the ride is offered again', async () => {
     const r2 = (await request(riderY)).id
     expect((await one<{ d: string }>('service', `select dispatch_ride($1) as d`, [r2])).d).toBe(capA)

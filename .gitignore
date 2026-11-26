@@ -14,3 +14,8 @@ preflight.json
 # Supabase CLI local state (project ref, pooler URL) — never commit
 supabase/.temp/
 supabase/.branches/
+
+# Local environment files (templates *.example stay tracked)
+.env.local
+.env.beta
+.env.staging
