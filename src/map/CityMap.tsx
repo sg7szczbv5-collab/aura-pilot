@@ -367,11 +367,11 @@ export function CityMap({
       };
 
       if (existingSource) {
-        existingSource.setData(geojsonData as unknown as GeoJSON.FeatureCollection);
+        existingSource.setData(geojsonData as unknown as Parameters<mapboxgl.GeoJSONSource['setData']>[0]);
       } else {
         mapRef.current.addSource(sourceId, {
           type: 'geojson',
-          data: geojsonData as unknown as GeoJSON.FeatureCollection,
+          data: geojsonData as unknown as Parameters<mapboxgl.Map['addSource']>[1] extends { data?: infer D } ? D : never,
         });
 
         mapRef.current.addLayer({
