@@ -9,6 +9,7 @@ import { corsHeaders, json, safeEqual } from '../_shared/http.ts'
 import { runPaymentWorker } from '../_shared/payments/handlers.ts'
 import { createPaymentsDb } from '../_shared/payments/db.ts'
 import { getProvider } from '../_shared/payments/registry.ts'
+import { guardedFetch, refusal, runtimeGuard } from '../_shared/ops/runtimeGuard.ts'
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -19,11 +20,17 @@ Deno.serve(async (req: Request) => {
   const admin = createClient(env('SUPABASE_URL') ?? '', env('SUPABASE_SERVICE_ROLE_KEY') ?? '', {
     auth: { persistSession: false, autoRefreshToken: false },
   })
-  const fetchFn = (u: string, i: { method: string; headers: Record<string, string>; body?: string }) => fetch(u, i)
+  // BETA / production guard (D3, C1): refuse before any provider call when the environment is not safe.
+  const guard = await runtimeGuard(admin, env)
+  if (!guard.ok) {
+    const r = refusal(guard)
+    return json(r.status, r.body)
+  }
+  const liveFetch = guardedFetch(guard, (u: string, i: { method: string; headers: Record<string, string>; body?: string }) => fetch(u, i))
   const db = createPaymentsDb(admin, (env('PAYMENT_PROVIDER') ?? 'mock') as 'mock' | 'moyasar')
   const summary = await runPaymentWorker({
     queue: () => db.queue(),
-    provider: (name) => getProvider(name, env, fetchFn),
+    provider: (name) => getProvider(name, env, liveFetch),
     db,
   })
   return json(200, summary)

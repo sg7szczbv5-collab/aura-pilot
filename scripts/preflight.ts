@@ -4,6 +4,7 @@
  *   npm run preflight                                   # development defaults, local files
  *   npm run preflight -- --target production --env-file .env.production
  *   npm run preflight -- --target production --env-file .env.production --db   # + live ops_readiness()
+ *   npm run preflight -- --target staging --guard     # + environment gate (marker, project, integrity)
  *   add --json for machine-readable output (CI)
  *
  * Checks: configuration & secret hygiene (src/ops/configChecks.ts), hosting
@@ -13,7 +14,8 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { checkConfig, scanBundle, summarize, type Check, type Env, type Target } from '../src/ops/configChecks'
+import { checkConfig, checkGuard, scanBundle, summarize, type Check, type Env, type GuardConfig, type Target } from '../src/ops/configChecks'
+import { projectRefFromUrl } from '../src/ops/prodBinding'
 import { checkHeaders, diffVercelHeaders } from '../src/ops/securityHeaders'
 import { parseEnvFile } from '../src/ops/envFile'
 
@@ -71,6 +73,26 @@ async function main() {
       if (error || !data) checks.push({ id: 'db_reachable', area: 'database', severity: 'blocker', ok: false, detail: error?.message ?? 'no data' })
       else for (const c of (data as { checks: Check[] }).checks) checks.push({ ...c, id: `db.${c.id}`, area: `db/${c.area}` })
     }
+  }
+
+  // Environment gate (migration 021): valid marker, right mode/project, fresh passing integrity.
+  // Runs with --guard (Deploy: after migrations, before functions) and with --db.
+  if (flag('guard') || flag('db')) {
+    const url = env.SUPABASE_URL ?? env.VITE_SUPABASE_URL
+    const key = env.SUPABASE_SERVICE_ROLE_KEY
+    let cfg: GuardConfig | null = null
+    if (url && key) {
+      try {
+        const { createClient } = await import('@supabase/supabase-js')
+        const sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } })
+        await sb.rpc('ops_integrity_check')
+        const { data, error } = await sb.rpc('ops_runtime_config')
+        if (!error && data && typeof data === 'object') cfg = data as GuardConfig
+      } catch {
+        cfg = null
+      }
+    }
+    checks.push(...checkGuard(cfg, target, env.SUPABASE_PROJECT_REF ?? projectRefFromUrl(url) ?? undefined))
   }
 
   const s = summarize(checks)

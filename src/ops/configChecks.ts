@@ -10,6 +10,8 @@ export type Check = { id: string; area: string; severity: Severity; ok: boolean;
 export type Target = 'development' | 'staging' | 'production'
 export type Env = Record<string, string | undefined>
 
+import { PROD_PROJECT_REF, projectRefFromUrl } from './prodBinding'
+
 const MIN_SECRET = 32
 const PLACEHOLDER = /your-project-ref|your-anon|changeme|example|xxxx|<.*>/i
 
@@ -39,7 +41,7 @@ export function looksSecret(value: string): boolean {
   return /^sk_(live|test)_/.test(value) || jwtRole(value) === 'service_role' || /^sb_secret_/.test(value) || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value)
 }
 
-export function checkConfig(env: Env, target: Target): Check[] {
+export function checkConfig(env: Env, target: Target, prodRef: string | null = PROD_PROJECT_REF): Check[] {
   const prod = target === 'production'
   const live = target !== 'development'
   const out: Check[] = []
@@ -104,6 +106,62 @@ export function checkConfig(env: Env, target: Target): Check[] {
     add('wasl_config', 'wasl', 'blocker', /^https:\/\//.test(env.WASL_API_BASE_URL ?? '') && has(env.WASL_APP_ID) && has(env.WASL_APP_KEY), 'Wasl base URL (HTTPS), app id and key')
   }
 
+  // ── Environment identity + BETA isolation (migration 021, docs/beta/BETA_SECURITY.md) ──
+  // staging = the closed BETA: mock providers only, no live credential, never the production project.
+  const urlRef = projectRefFromUrl(env.VITE_SUPABASE_URL)
+  const linkRef = env.SUPABASE_PROJECT_REF?.trim() || undefined
+  if (live) {
+    add('project_ref_consistent', 'security', 'blocker', !!urlRef && (!linkRef || linkRef === urlRef),
+      !urlRef ? 'VITE_SUPABASE_URL is not a https://<ref>.supabase.co project URL' : linkRef && linkRef !== urlRef ? 'SUPABASE_PROJECT_REF (deploy target) differs from VITE_SUPABASE_URL' : 'App URL and deploy target are the same project')
+  }
+  if (target === 'staging') {
+    const sk = env.MOYASAR_SECRET_KEY ?? ''
+    const pk = env.VITE_MOYASAR_PUBLISHABLE_KEY ?? ''
+    add('beta_not_production_project', 'beta', 'blocker', !!urlRef && urlRef !== prodRef && linkRef !== prodRef && (prodRef === null || ![urlRef, linkRef].includes(prodRef)),
+      'The BETA project is not the production project')
+    add('beta_payments_mock', 'beta', 'blocker', provider === 'mock' && (env.VITE_PAYMENT_PROVIDER ?? 'mock') === 'mock', `BETA payments must be mock (PAYMENT_PROVIDER=${provider}, VITE_PAYMENT_PROVIDER=${env.VITE_PAYMENT_PROVIDER ?? 'mock'})`)
+    add('beta_no_live_keys', 'beta', 'blocker', !/^sk_live_/.test(sk) && !/^pk_live_/.test(pk) && !Object.values(env).some((v) => typeof v === 'string' && /^(sk|pk)_live_/.test(v)),
+      'No Moyasar live key (sk_live_/pk_live_) anywhere in the BETA configuration')
+    add('beta_wasl_mock', 'beta', 'blocker', wasl === 'mock' && !has(env.WASL_APP_KEY) && !has(env.WASL_APP_ID), `BETA Wasl must be mock with no Elm credentials (WASL_MODE=${wasl})`)
+    add('beta_payouts_mock', 'beta', 'blocker', (env.PAYOUT_PROVIDER ?? 'mock') === 'mock', `PAYOUT_PROVIDER=${env.PAYOUT_PROVIDER ?? 'mock'} (bank payouts are not allowed in BETA)`)
+  }
+  if (prod) {
+    add('production_binding', 'security', 'blocker', prodRef !== null && urlRef === prodRef && (!linkRef || linkRef === prodRef),
+      prodRef === null ? 'PROD_PROJECT_REF is not verified yet (src/ops/prodBinding.ts): production deploys are blocked' : 'Production URL and deploy target equal the verified PROD_PROJECT_REF')
+  }
+
+  return out
+}
+
+/** What `ops_runtime_config()` returns (migration 021). */
+export type GuardConfig = {
+  marker_state: string
+  mode: string | null
+  project_ref: string | null
+  live_allowed: boolean
+  integrity_ok: boolean | null
+  integrity_checked_at: string | null
+}
+
+/**
+ * Deploy gate (run after migrations, before Edge Functions): the database must carry a valid marker
+ * for the expected mode and project, with a passing, fresh integrity check. Fails closed on anything else.
+ */
+export function checkGuard(cfg: GuardConfig | null, target: Target, projectRef: string | undefined, now = new Date()): Check[] {
+  const out: Check[] = []
+  const add = (id: string, ok: boolean, detail: string) => out.push({ id, area: 'guard', severity: 'blocker', ok, detail })
+  if (!cfg) {
+    add('guard_readable', false, 'ops_runtime_config() could not be read (migration 021 missing, or wrong key)')
+    return out
+  }
+  const wantMode = target === 'production' ? 'production' : 'beta'
+  add('guard_marker', cfg.marker_state === 'ok', `Environment marker: ${cfg.marker_state}`)
+  add('guard_mode', cfg.mode === wantMode, `Marker mode ${cfg.mode ?? '(none)'} for target ${target} (expected ${wantMode})`)
+  add('guard_project', !!projectRef && cfg.project_ref === projectRef, 'Marker project ref equals the deploy target')
+  const at = cfg.integrity_checked_at ? Date.parse(cfg.integrity_checked_at) : NaN
+  add('guard_integrity', cfg.integrity_ok === true && Number.isFinite(at) && now.getTime() - at <= 3 * 60_000,
+    cfg.integrity_ok === true ? 'Integrity check passed within 3 minutes' : 'Integrity check failed, stale or never ran')
+  if (target !== 'production') add('guard_no_live', cfg.live_allowed === false, 'Live operations are refused by the database')
   return out
 }
 
