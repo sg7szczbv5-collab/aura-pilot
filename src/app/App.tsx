@@ -175,37 +175,14 @@ function Launcher() {
 /* ------------------------------------------------------------------ */
 
 function MobileHost({ app }: { app: 'passenger' | 'driver' }) {
-  const { t, dir } = useI18n()
+  const { dir } = useI18n()
   const mobile = useIsMobile()
   const el = app === 'passenger' ? <PassengerApp /> : <DriverApp />
   if (mobile) return <Device>{el}</Device>
   return (
     <div dir={dir} className={cx('flex min-h-screen flex-col', app === 'driver' ? 'aura-field' : 'bg-road')}>
       <TopNav dark={app === 'driver'} />
-      <div className="flex flex-1 items-center justify-center gap-12 px-6 pb-8">
-        <div className={cx('hidden max-w-xs xl:block', app === 'driver' ? 'text-white' : 'text-ink')}>
-          <AppIcon size={56} variant={app === 'driver' ? 'primary' : 'light'} />
-          <p className="mt-5 font-display text-3xl font-semibold" dir="ltr" style={{ textAlign: 'start' }}>
-            {app === 'passenger' ? 'AURA Passenger' : 'AURA Driver'}
-          </p>
-          <p className={cx('mt-2 text-sm leading-relaxed', app === 'driver' ? 'text-white/55' : 'text-mute')}>
-            {app === 'passenger'
-              ? t('رقم تجريبي: 55 765 4321 · الرمز 2468. أي رقم آخر ينشئ حساباً جديداً.', 'Demo number: 55 765 4321 · code 2468. Any other number creates a new account.')
-              : t('رقم تجريبي: 55 123 4567 · الرمز 1357. أي رقم آخر يبدأ تسجيل كابتن جديد.', 'Demo number: 55 123 4567 · code 1357. Any other number starts a new captain application.')}
-          </p>
-          <div className="mt-5 flex flex-wrap gap-2">
-            <a href={app === 'passenger' ? '#/driver' : '#/passenger'}>
-              <Button variant="secondary" size="sm" className={app === 'driver' ? 'border-white/20! bg-transparent! text-white!' : ''}>
-                {app === 'passenger' ? t('افتح تطبيق الكابتن', 'Open Driver app') : t('افتح تطبيق العميل', 'Open Passenger app')}
-              </Button>
-            </a>
-            <a href="#/ecosystem">
-              <Button variant="go" size="sm">
-                {t('المنظومة المباشرة', 'Live ecosystem')}
-              </Button>
-            </a>
-          </div>
-        </div>
+      <div className="flex flex-1 items-center justify-center px-6 pb-8">
         <Device statusTone={app === 'driver' ? 'light' : 'dark'} reserveH={110}>
           {el}
         </Device>

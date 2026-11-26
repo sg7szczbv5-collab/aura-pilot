@@ -8,15 +8,17 @@ import { actions, getDriver, getSession, setSession, store, useEco } from '../..
 import { auth, authErrorText } from '../../auth/authService'
 import { syncDriverSelf } from '../../data/serverMirror'
 import { submitServerApplication, type DocKey } from '../../captain/onboarding'
-import { VEHICLE_MAX_AGE_YEARS, ageOn, formatIban, isValidPlate, isValidSaudiIban, isValidSaudiId, isValidSequenceNumber, vehicleAgeOk } from '../../compliance/validators'
+import { ageOn, formatIban, isValidPlate, isValidSaudiIban, isValidSaudiId, isValidSequenceNumber, vehicleAgeOk } from '../../compliance/validators'
 import { LegalViewer } from '../../legal/LegalViewer'
 import type { LegalDocId } from '../../legal/documents'
 import { CITIES } from '../../core/geo'
-import { VEHICLE_CLASSES } from '../../core/pricing'
 import type { CityId, DriverDoc, VehicleClassId } from '../../core/types'
 import { TopBar, screenMotion } from '../shared/mobile'
 import { ExpiryField, LATIN_TO_AR, UploadTile, onboardingErrorText } from './formParts'
 import { Resubmit } from './Resubmit'
+import { VehicleForm } from './VehicleForm'
+import { VEHICLE_COLORS, colorById } from '../../data/vehicleCatalog'
+import type { VehicleFields } from '../../captain/resubmit'
 import { showVehicleRejectedScreen, vehicleRejection } from './vehicleRejection'
 
 export function DriverSplash({ onDone }: { onDone: () => void }) {
@@ -56,7 +58,7 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
   const [sending, setSending] = useState(false)
   const [form, setForm] = useState({ nameAr: '', nameEn: '', nationalId: '', email: '', city: 'riyadh' as CityId, dob: '', iban: '' })
   const [docs, setDocs] = useState<Record<DriverDoc['id'], string | undefined>>({ national_id: undefined, license: undefined, registration: undefined, insurance: undefined, photo: undefined })
-  const [veh, setVeh] = useState({ make: 'Toyota', model: 'Camry', year: '2023', color: 'white', digits: '', letters: '', classId: 'go' as VehicleClassId, sequence: '' })
+  const [veh, setVeh] = useState<VehicleFields>({ classId: 'go', make: '', model: '', year: 0, color: 'white', plateLetters: '', plateDigits: '', sequenceNumber: '', seats: 4 })
   // Supabase mode: real files, expiry dates, consents and server submission.
   const live = auth.mode === 'supabase'
   const files = useRef<Partial<Record<DocKey, File>>>({})
@@ -127,8 +129,8 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
   const dobOk = !live || (!!form.dob && ageOn(new Date(`${form.dob}T00:00:00`)) >= 18)
   const ibanOk = !live || isValidSaudiIban(form.iban.replace(/\s/g, '').toUpperCase())
   const vehicleOk = live
-    ? vehicleAgeOk(Number(veh.year)) && isValidPlate(veh.letters.toUpperCase(), veh.digits) && isValidSequenceNumber(veh.sequence)
-    : Number(veh.year) >= 2018 && veh.digits.length >= 3 && veh.letters.length >= 2
+    ? vehicleAgeOk(veh.year) && isValidPlate(veh.plateLetters.toUpperCase(), veh.plateDigits) && isValidSequenceNumber(veh.sequenceNumber)
+    : vehicleAgeOk(veh.year) && veh.plateDigits.length >= 3 && veh.plateLetters.length >= 2
 
   const submitLive = async () => {
     const uid = getSession().driverAuthId
@@ -143,7 +145,7 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
       dateOfBirth: form.dob,
       iban: form.iban,
       cityCode: form.city,
-      vehicle: { classId: veh.classId, make: veh.make, model: veh.model, year: Number(veh.year), color: veh.color, plateLetters: veh.letters, plateDigits: veh.digits, sequenceNumber: veh.sequence, seats: veh.classId === 'xl' ? 7 : 4 },
+      vehicle: { ...veh, make: veh.make.trim(), model: veh.model.trim(), plateLetters: veh.plateLetters.toUpperCase(), seats: veh.classId === 'xl' ? 7 : 4 },
       docs: Object.fromEntries((Object.keys(files.current) as DocKey[]).map((k) => [k, { file: files.current[k]!, expiresAt: expiry[k] }])),
       consentsAccepted: agree,
       locale: lang,
@@ -156,14 +158,8 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
 
   const submit = () => {
     if (live) return void submitLive()
-    const colors: Record<string, { ar: string; en: string; hex: string }> = {
-      white: { ar: 'أبيض', en: 'White', hex: '#F5F5F3' },
-      black: { ar: 'أسود', en: 'Black', hex: '#141516' },
-      silver: { ar: 'فضي', en: 'Silver', hex: '#B9BCBE' },
-      grey: { ar: 'رمادي', en: 'Grey', hex: '#6E7174' },
-    }
-    const c = colors[veh.color]
-    const letters = veh.letters.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3)
+    const c = colorById(veh.color) ?? VEHICLE_COLORS[0]
+    const letters = veh.plateLetters.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3)
     const id = actions.submitDriverApplication({
       name: { ar: form.nameAr || form.nameEn, en: form.nameEn || form.nameAr },
       phone: `+966 ${phone.slice(0, 2)} ${phone.slice(2, 5)} ${phone.slice(5)}`,
@@ -172,13 +168,13 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
       cityId: form.city,
       docs: (Object.keys(docs) as DriverDoc['id'][]).map((k) => ({ id: k, status: docs[k] ? 'uploaded' : 'missing', fileName: docs[k] })),
       vehicle: {
-        make: veh.make,
-        model: veh.model,
-        year: Number(veh.year),
+        make: veh.make.trim(),
+        model: veh.model.trim(),
+        year: veh.year,
         color: { ar: c.ar, en: c.en },
         colorHex: c.hex,
-        plate: { digits: veh.digits, lettersEn: letters, lettersAr: letters.split('').map((l) => LATIN_TO_AR[l] ?? l).join(' ') },
-        classId: veh.classId,
+        plate: { digits: veh.plateDigits, lettersEn: letters, lettersAr: letters.split('').map((l) => LATIN_TO_AR[l] ?? l).join(' ') },
+        classId: veh.classId as VehicleClassId,
       },
     })
     onAuthed(id)
@@ -304,41 +300,8 @@ export function DriverAuth({ onAuthed }: { onAuthed: (id: string) => void }) {
               {step === 'vehicle' && (
                 <>
                   <h2 className="font-display text-xl font-semibold">{t('بيانات المركبة', 'Vehicle details')}</h2>
-                  <div className="mt-4 grid grid-cols-2 gap-3">
-                    <Field label={t('الشركة', 'Make')}>
-                      <Input value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} dir="ltr" />
-                    </Field>
-                    <Field label={t('الطراز', 'Model')}>
-                      <Input value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} dir="ltr" />
-                    </Field>
-                    <Field
-                      label={t('سنة الصنع', 'Year')}
-                      error={live ? (!vehicleAgeOk(Number(veh.year)) ? t(`لا يزيد عمر المركبة عن ${VEHICLE_MAX_AGE_YEARS} سنوات`, `At most ${VEHICLE_MAX_AGE_YEARS} years old`) : undefined) : Number(veh.year) < 2018 ? t('٢٠١٨ أو أحدث', '2018 or newer') : undefined}
-                    >
-                      <Input value={veh.year} inputMode="numeric" className="num" dir="ltr" onChange={(e) => setVeh({ ...veh, year: e.target.value.replace(/\D/g, '').slice(0, 4) })} />
-                    </Field>
-                    <Field label={t('اللون', 'Colour')}>
-                      <Select className="h-12 w-full" value={veh.color} onChange={(v) => setVeh({ ...veh, color: v })} options={[{ value: 'white', label: t('أبيض', 'White') }, { value: 'black', label: t('أسود', 'Black') }, { value: 'silver', label: t('فضي', 'Silver') }, { value: 'grey', label: t('رمادي', 'Grey') }]} />
-                    </Field>
-                    <Field label={t('أرقام اللوحة', 'Plate digits')}>
-                      <Input value={veh.digits} inputMode="numeric" className="num" dir="ltr" placeholder="1234" onChange={(e) => setVeh({ ...veh, digits: e.target.value.replace(/\D/g, '').slice(0, 4) })} />
-                    </Field>
-                    <Field label={t('حروف اللوحة (EN)', 'Plate letters')}>
-                      <Input value={veh.letters} className="num uppercase" dir="ltr" placeholder="RHB" onChange={(e) => setVeh({ ...veh, letters: e.target.value.replace(/[^a-zA-Z]/g, '').slice(0, 3) })} />
-                    </Field>
-                    {live && (
-                      <Field label={t('الرقم التسلسلي (الاستمارة)', 'Sequence no. (Istimara)')} className="col-span-2" error={veh.sequence && !isValidSequenceNumber(veh.sequence) ? t('٦–١٢ رقماً', '6–12 digits') : undefined}>
-                        <Input value={veh.sequence} inputMode="numeric" className="num" dir="ltr" onChange={(e) => setVeh({ ...veh, sequence: e.target.value.replace(/\D/g, '').slice(0, 12) })} />
-                      </Field>
-                    )}
-                  </div>
-                  <p className="mt-4 mb-2 text-[13px] font-medium text-white/70">{t('الفئة المطلوبة', 'Requested class')}</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {VEHICLE_CLASSES.map((c) => (
-                      <button key={c.id} onClick={() => setVeh({ ...veh, classId: c.id })} className={cx('rounded-xl px-3 py-2.5 text-start text-sm font-semibold', veh.classId === c.id ? 'bg-go text-ink' : 'bg-ink-3')} dir="ltr">
-                        {c.name}
-                      </button>
-                    ))}
+                  <div className="mt-4">
+                    <VehicleForm value={veh} onChange={setVeh} live={live} />
                   </div>
                 </>
               )}

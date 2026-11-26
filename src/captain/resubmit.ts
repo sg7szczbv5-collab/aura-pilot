@@ -47,7 +47,7 @@ export function validateResubmit(i: Omit<ResubmitInput, 'uid'>, opts: { live: bo
   if (i.mode !== 'keep') {
     const v = i.vehicle
     if (!v || !v.make.trim() || !v.model.trim()) return { ok: false, field: 'vehicle' }
-    if (opts.live ? !vehicleAgeOk(v.year, now) : v.year < 2018) return { ok: false, field: 'vehicleYear' }
+    if (!vehicleAgeOk(v.year, now)) return { ok: false, field: 'vehicleYear' }
     if (opts.live ? !isValidPlate(v.plateLetters.toUpperCase(), v.plateDigits) : v.plateDigits.length < 3 || v.plateLetters.length < 2) return { ok: false, field: 'plate' }
     if (opts.live && !isValidSequenceNumber(v.sequenceNumber)) return { ok: false, field: 'sequenceNumber' }
   }

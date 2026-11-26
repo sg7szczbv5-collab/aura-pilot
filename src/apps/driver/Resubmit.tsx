@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Camera, Car, CarFront, PencilLine } from 'lucide-react'
-import { Button, cx, Field, ICON, Input, Select } from '../../ds/ui'
+import { Button, cx, ICON } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
 import { actions, getDriver, getVehicle } from '../../core/store'
 import { auth } from '../../auth/authService'
@@ -8,27 +8,22 @@ import { getSupabase } from '../../auth/supabaseClient'
 import { syncDriverSelf } from '../../data/serverMirror'
 import { NEEDS_EXPIRY, type DocKey } from '../../captain/onboarding'
 import { docsToResubmit, resubmitServer, validateResubmit, type VehicleFields, type VehicleMode } from '../../captain/resubmit'
-import { VEHICLE_MAX_AGE_YEARS, isValidSequenceNumber } from '../../compliance/validators'
-import { VEHICLE_CLASSES } from '../../core/pricing'
+import { VEHICLE_MAX_AGE_YEARS } from '../../compliance/validators'
 import type { DriverDoc, VehicleClassId } from '../../core/types'
 import { TopBar } from '../shared/mobile'
 import { ExpiryField, LATIN_TO_AR, UploadTile } from './formParts'
+import { VehicleForm } from './VehicleForm'
+import { VEHICLE_COLORS, colorById } from '../../data/vehicleCatalog'
 import { onboardingErrorText } from './formParts'
 
-const COLORS: Record<string, { ar: string; en: string; hex: string }> = {
-  white: { ar: 'أبيض', en: 'White', hex: '#F5F5F3' },
-  black: { ar: 'أسود', en: 'Black', hex: '#141516' },
-  silver: { ar: 'فضي', en: 'Silver', hex: '#B9BCBE' },
-  grey: { ar: 'رمادي', en: 'Grey', hex: '#6E7174' },
-}
-const EMPTY: VehicleFields = { classId: 'go', make: '', model: '', year: new Date().getFullYear(), color: 'white', plateLetters: '', plateDigits: '', sequenceNumber: '', seats: 4 }
+const EMPTY: VehicleFields = { classId: 'go', make: '', model: '', year: 0, color: 'white', plateLetters: '', plateDigits: '', sequenceNumber: '', seats: 4 }
 
 /**
  * «إكمال الطلب وإعادة التقديم»: upload only the rejected / missing documents, correct the
  * current vehicle or register another one, then send the application back to review.
  */
 export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onDone: () => void; onCancel: () => void }) {
-  const { t, lang } = useI18n()
+  const { t } = useI18n()
   const live = auth.mode === 'supabase'
   const d = getDriver(driverId)!
   const vehicleRejected = d.vehicleReview?.status === 'rejected'
@@ -57,7 +52,7 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
         })
     } else {
       const v = getVehicle(d.vehicleId)
-      if (v) setCurrent({ id: v.id, classId: v.classId, make: v.make, model: v.model, year: v.year, color: v.color.en.toLowerCase(), plateLetters: v.plate.lettersEn, plateDigits: v.plate.digits, sequenceNumber: '', seats: v.classId === 'xl' ? 7 : 4 })
+      if (v) setCurrent({ id: v.id, classId: v.classId, make: v.make, model: v.model, year: v.year, color: VEHICLE_COLORS.find((c) => c.en === v.color.en)?.id ?? v.color.en.toLowerCase(), plateLetters: v.plate.lettersEn, plateDigits: v.plate.digits, sequenceNumber: '', seats: v.classId === 'xl' ? 7 : 4 })
     }
     return () => {
       alive = false
@@ -109,7 +104,7 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
       }
       await syncDriverSelf(driverId)
     } else {
-      const c = COLORS[veh.color] ?? COLORS.white
+      const c = colorById(veh.color) ?? VEHICLE_COLORS[0]
       const letters = veh.plateLetters.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3)
       actions.resubmitDriverApplication(driverId, {
         mode,
@@ -172,37 +167,8 @@ export function Resubmit({ driverId, onDone, onCancel }: { driverId: string; onD
             ))}
           </div>
           {mode !== 'keep' && (
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <Field label={t('الشركة', 'Make')}>
-                <Input value={veh.make} dir="ltr" onChange={(e) => setVeh({ ...veh, make: e.target.value })} />
-              </Field>
-              <Field label={t('الطراز', 'Model')}>
-                <Input value={veh.model} dir="ltr" onChange={(e) => setVeh({ ...veh, model: e.target.value })} />
-              </Field>
-              <Field label={t('سنة الصنع', 'Year')}>
-                <Input value={String(veh.year || '')} inputMode="numeric" className="num" dir="ltr" onChange={(e) => setVeh({ ...veh, year: Number(e.target.value.replace(/\D/g, '').slice(0, 4)) })} />
-              </Field>
-              <Field label={t('اللون', 'Colour')}>
-                <Select className="h-12 w-full" value={veh.color} onChange={(v) => setVeh({ ...veh, color: v })} options={Object.entries(COLORS).map(([k, c]) => ({ value: k, label: lang === 'en' ? c.en : c.ar }))} />
-              </Field>
-              <Field label={t('أرقام اللوحة', 'Plate digits')}>
-                <Input value={veh.plateDigits} inputMode="numeric" className="num" dir="ltr" placeholder="1234" onChange={(e) => setVeh({ ...veh, plateDigits: e.target.value.replace(/\D/g, '').slice(0, 4) })} />
-              </Field>
-              <Field label={t('حروف اللوحة (EN)', 'Plate letters')}>
-                <Input value={veh.plateLetters} className="num uppercase" dir="ltr" placeholder="RHB" onChange={(e) => setVeh({ ...veh, plateLetters: e.target.value.replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase() })} />
-              </Field>
-              {live && (
-                <Field label={t('الرقم التسلسلي (الاستمارة)', 'Sequence no. (Istimara)')} className="col-span-2" error={veh.sequenceNumber && !isValidSequenceNumber(veh.sequenceNumber) ? t('٦–١٢ رقماً', '6–12 digits') : undefined}>
-                  <Input value={veh.sequenceNumber} inputMode="numeric" className="num" dir="ltr" onChange={(e) => setVeh({ ...veh, sequenceNumber: e.target.value.replace(/\D/g, '').slice(0, 12) })} />
-                </Field>
-              )}
-              <div className="col-span-2 grid grid-cols-2 gap-2">
-                {VEHICLE_CLASSES.map((c) => (
-                  <button key={c.id} onClick={() => setVeh({ ...veh, classId: c.id })} className={cx('rounded-xl px-3 py-2.5 text-start text-sm font-semibold', veh.classId === c.id ? 'bg-go text-ink' : 'bg-ink-3')} dir="ltr">
-                    {c.name}
-                  </button>
-                ))}
-              </div>
+            <div className="mt-3">
+              <VehicleForm key={mode} value={veh} onChange={setVeh} live={live} />
             </div>
           )}
         </section>
