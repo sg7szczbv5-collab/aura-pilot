@@ -32,7 +32,7 @@ import { CityMap, type MapMarker } from '../../map/CityMap'
 import { Badge, Button, cx, Divider, ErrorState, ICON, IconButton, Input, Money, Row, Segmented, Sheet, useToast } from '../../ds/ui'
 import { CarArt } from '../../ds/vehicle'
 import { useI18n } from '../../i18n/I18n'
-import { CITY_CENTER, GPS_PICKUP_ID, UNSET_PICKUP, validatePickup } from '../../location/riderLocation'
+import { CITY_CENTER, GPS_PICKUP_ID, UNSET_PICKUP, clientPinBlock, validatePickup } from '../../location/riderLocation'
 import { PickupLocation, type PickupLocationProps } from './PickupLocation'
 import { DEMO_CURRENT, PLACES, haversineKm, nearestPlaceName, pinPlace, routeBetween } from '../../core/geo'
 import { VEHICLE_CLASSES, classById } from '../../core/pricing'
@@ -285,8 +285,9 @@ export function DestinationScreen({ draft, customer, recent, onBack, onChoose, o
 export function MapPickScreen({ target, start, onBack, onConfirm }: { target: 'pickup' | 'dropoff'; start: Place; onBack: () => void; onConfirm: (p: Place) => void }) {
   const { t, lang } = useI18n()
   const [center, setCenter] = useState(start.pos)
-  const z = zoneAt(center)
-  const blocked = target === 'pickup' && (z.restricted || !z.inService)
+  // F3: demo zones decide only in the demo build. LIVE never blocks on them: the server decides
+  // (create_ride) and the confirm screen shows its refusal.
+  const blocked = target === 'pickup' ? clientPinBlock(AUTH_MODE === 'supabase', zoneAt(center)) : null
   return (
     <div className="absolute inset-0">
       <CityMap center={start.pos} zoom={150} onCenterChange={setCenter} onPick={setCenter} />
@@ -317,7 +318,7 @@ export function MapPickScreen({ target, start, onBack, onConfirm }: { target: 'p
             </p>
           </div>
         </div>
-        {blocked && <div className="mb-3"><ErrorState title={z.restricted ? t('الالتقاء غير متاح في هذه المنطقة', 'Pickups are not allowed in this zone') : t('خارج نطاق الخدمة', 'Outside the service area')} body={t('حرّك الدبوس إلى موقع قريب.', 'Move the pin to a nearby spot.')} /></div>}
+        {blocked && <div className="mb-3"><ErrorState title={blocked === 'restricted' ? t('الالتقاء غير متاح في هذه المنطقة', 'Pickups are not allowed in this zone') : t('خارج نطاق الخدمة', 'Outside the service area')} body={t('حرّك الدبوس إلى موقع قريب.', 'Move the pin to a nearby spot.')} /></div>}
         <Button size="lg" full disabled={!!blocked} onClick={async () => onConfirm(MAPS_PROVIDER === 'google' ? await reverseGeocode(center, lang) : pinPlace(center))}>
           {target === 'pickup' ? t('تأكيد موقع الانطلاق', 'Confirm pickup') : t('تأكيد الوجهة', 'Confirm destination')}
         </Button>
@@ -336,7 +337,8 @@ export function VehiclesScreen({ draft, onBack, onSelect, onNext }: { draft: Boo
   // Supabase: binding upfront prices from the server route; demo: local pricing engine.
   const quotes = useQuotes(draft.pickup, draft.dropoff!, draft.promo, draft.classId, lang).byClass
   const eta = (id: VehicleClassId) => etaFromCars(fleet, draft.pickup.pos, id, classById(id).etaFactor)
-  const surge = zoneAt(draft.pickup.pos).surge
+  // F3: the demo surge zones are not the server's; LIVE shows surge from the server quote only.
+  const surge = AUTH_MODE === 'supabase' ? undefined : zoneAt(draft.pickup.pos).surge
   const sel = quotes[draft.classId]
   return (
     <div className="absolute inset-0">
@@ -481,11 +483,25 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
   const q = quote.byClass[draft.classId]
   const walletShort = draft.payment === 'wallet' && customer.walletBalance < q.total
 
+  // F2: a GPS pickup ages while the rider sits on this screen — re-render every 30 s so the button
+  // and the warning follow, and re-check at tap time below.
+  const [, setTick] = useState(0)
+  const gpsPickup = draft.pickup.id === GPS_PICKUP_ID
+  useEffect(() => {
+    if (!gpsPickup) return
+    const id = setInterval(() => setTick((n) => n + 1), 30_000)
+    return () => clearInterval(id)
+  }, [gpsPickup])
   const pickupCheck = validatePickup(draft.pickup, AUTH_MODE === 'supabase')
+  const pickupProblemText = (p: string) =>
+    p === 'stale_gps'
+      ? t('موقعك من GPS قديم. حدّثه أو اختر نقطة الالتقاء يدوياً.', 'Your GPS location is out of date. Refresh it or choose your pickup by hand.')
+      : t('حدّد نقطة الالتقاء أولاً.', 'Set your pickup first.')
   const confirm = () => {
     setError('')
     // Never send a request without a usable pickup (unset, demo point in LIVE, bad coordinates).
-    if (!pickupCheck.ok) return setError(t('حدّد نقطة الالتقاء أولاً.', 'Set your pickup first.'))
+    const fresh = validatePickup(draft.pickup, AUTH_MODE === 'supabase', Date.now())
+    if (!fresh.ok) return setError(pickupProblemText(fresh.problem))
     if (draft.scheduleAt) {
       actions.scheduleRide({ passengerId: customer.id, pickup: draft.pickup, dropoff: draft.dropoff!, vehicleClass: draft.classId, at: draft.scheduleAt })
       toast(t('تمت جدولة رحلتك', 'Your ride is scheduled'))
@@ -505,7 +521,7 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
           setError(
             {
               restricted: t('لا يمكن الالتقاء في هذه المنطقة. عدّل نقطة الانطلاق.', 'Pickups are not allowed in this zone. Adjust your pickup.'),
-              out_of_service: t('موقع الانطلاق خارج نطاق الخدمة.', 'Pickup is outside the service area.'),
+              out_of_service: t('موقع الانطلاق خارج نطاق الخدمة. اختر نقطة التقاء داخل نطاق الخدمة.', 'Pickup is outside the service area. Choose a pickup inside the service area.'),
               blocked: t('حسابك موقوف. تواصل مع الدعم.', 'Your account is suspended. Contact support.'),
               active_exists: t('لديك رحلة نشطة بالفعل.', 'You already have an active trip.'),
               consent_required: t('وافق على الشروط وسياسة الخصوصية أولاً.', 'Accept the Terms and Privacy Policy first.'),
@@ -634,7 +650,7 @@ export function ConfirmScreen({ draft, customer, onBack, onChange, onConfirm, on
         )}
         {!pickupCheck.ok && (
           <p role="alert" className="mb-2 text-center text-[13px] font-medium text-amber-800" data-testid="pickup-required">
-            {t('حدّد نقطة الالتقاء قبل تأكيد الرحلة.', 'Set your pickup before confirming the ride.')}
+            {pickupCheck.ok ? null : pickupCheck.problem === 'stale_gps' ? pickupProblemText('stale_gps') : t('حدّد نقطة الالتقاء قبل تأكيد الرحلة.', 'Set your pickup before confirming the ride.')}
           </p>
         )}
         <Button size="lg" full loading={busy || (!draft.scheduleAt && quote.loading)} disabled={!pickupCheck.ok || walletShort || (!draft.scheduleAt && !quote.exact)} onClick={confirm}>

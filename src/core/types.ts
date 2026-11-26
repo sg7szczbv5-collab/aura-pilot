@@ -32,6 +32,8 @@ export type Place = {
   sub: Bilingual
   pos: LatLng
   kind?: 'airport' | 'mall' | 'office' | 'home' | 'work' | 'landmark' | 'university' | 'pin'
+  /** GPS pickups only: when the fix was taken (ms). Manual places have none and need none. */
+  fixedAt?: number
 }
 
 /** All money is stored in halalas (1 SAR = 100 halalas) to avoid float drift. */

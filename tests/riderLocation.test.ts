@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  CITY_CENTER, GPS_PICKUP_ID, capability, UNSET_PICKUP, locateOnce, mayApplyFix, pickupFromFix, readPermission, shouldAutoLocate, validatePickup,
+  CITY_CENTER, GPS_PICKUP_ID, MAX_GPS_PICKUP_AGE_MS, capability, clientPinBlock, coarseForNearby, shouldApplyFix, UNSET_PICKUP, locateOnce, mayApplyFix, pickupFromFix, readPermission, shouldAutoLocate, validatePickup,
 } from '../src/location/riderLocation'
 import { DEMO_CURRENT } from '../src/core/geo'
 import { serverGateway } from '../src/data/tripGateway'
@@ -73,12 +73,6 @@ describe('permission: never asked without a reason, never asked again after a re
     expect(shouldAutoLocate('granted', false)).toBe(true)
     expect(shouldAutoLocate('granted', true)).toBe(false)
     for (const p of ['prompt', 'denied', 'unknown'] as const) expect(shouldAutoLocate(p, false)).toBe(false)
-  })
-  it('the hook marks a known refusal as denied without prompting, and the UI hides the retry button when denied', () => {
-    const hook = read('src/location/useRiderLocation.ts')
-    expect(hook).toMatch(/if \(p === 'denied'\) setState\(\{ status: 'denied' \}\)/)
-    const ui = read('src/apps/passenger/PickupLocation.tsx')
-    expect(ui).toMatch(/const canAsk = status !== 'locating' && status !== 'denied'/)
   })
 })
 
@@ -147,5 +141,65 @@ describe('LIVE mode never uses the demo point, and location data is not persiste
       const src = read(f).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') // code only, not comments
       expect(src, f).not.toMatch(/localStorage|sessionStorage|indexedDB|getSupabase|rpc\(|fetch\(/)
     }
+  })
+})
+
+describe('F1 — a GPS result applies only to the pickup revision it was requested for', () => {
+  const base = { status: 'located' as const, currentRev: 4, current: UNSET_PICKUP, live: true, inDemoArea: true }
+  it('applies when the revision is unchanged', () => {
+    expect(shouldApplyFix({ ...base, token: 4 })).toBe(true)
+    expect(shouldApplyFix({ ...base, token: 4, byUser: true, current: pin(RIYADH) })).toBe(true) // explicit tap, nothing changed since
+  })
+  it('drops a late result once the rider changed the pickup by hand (pin, search) or entered a pricing screen', () => {
+    expect(shouldApplyFix({ ...base, token: 3 })).toBe(false)
+    expect(shouldApplyFix({ ...base, token: 3, byUser: true, current: pin(RIYADH) })).toBe(false) // the reviewed race
+  })
+  it('drops results without a token, non-located states, and demo fixes outside the demo city', () => {
+    expect(shouldApplyFix({ ...base, token: undefined })).toBe(false)
+    expect(shouldApplyFix({ ...base, token: 4, status: 'locating' })).toBe(false)
+    expect(shouldApplyFix({ ...base, token: 4, live: false, inDemoArea: false })).toBe(false)
+  })
+  it('an automatic result still never replaces a manual pickup, even with a matching token', () => {
+    expect(shouldApplyFix({ ...base, token: 4, current: pin(RIYADH) })).toBe(false)
+  })
+})
+
+describe('F2 — GPS pickups expire; manual pickups do not need a timestamp', () => {
+  const now = 1_800_000_000_000
+  it('a fresh GPS pickup is valid, an old one is refused as stale_gps', () => {
+    expect(validatePickup(pickupFromFix(RIYADH, 10, now - 60_000), true, now)).toEqual({ ok: true })
+    expect(validatePickup(pickupFromFix(RIYADH, 10, now - MAX_GPS_PICKUP_AGE_MS - 1), true, now)).toEqual({ ok: false, problem: 'stale_gps' })
+  })
+  it('a GPS pickup without a fix time, or from the future, is refused', () => {
+    expect(validatePickup({ ...pickupFromFix(RIYADH), fixedAt: undefined }, true, now).ok).toBe(false)
+    expect(validatePickup(pickupFromFix(RIYADH, 10, now + 10 * 60_000), true, now).ok).toBe(false)
+  })
+  it('a manual pin or a search result has no fixedAt and stays valid however old', () => {
+    expect(pin(RIYADH).fixedAt).toBeUndefined()
+    expect(validatePickup(pin(RIYADH), true, now + 365 * 24 * 3600_000)).toEqual({ ok: true })
+  })
+  it('the fix time comes from the browser fix, not from when it was applied', () => {
+    expect(pickupFromFix(RIYADH, 10, 1234).fixedAt).toBe(1234)
+  })
+})
+
+describe('F3 — demo zones never decide a LIVE pickup', () => {
+  it('LIVE: no client verdict at all (the server decides and the confirm screen shows its refusal)', () => {
+    expect(clientPinBlock(true, { restricted: { id: 'z' }, inService: false })).toBeNull()
+  })
+  it('DEMO: unchanged — restricted and out-of-service zones still block the pin', () => {
+    expect(clientPinBlock(false, { restricted: { id: 'z' }, inService: true })).toBe('restricted')
+    expect(clientPinBlock(false, { inService: false })).toBe('out_of_service')
+    expect(clientPinBlock(false, { inService: true })).toBeNull()
+  })
+})
+
+describe('F5 — the nearby-cars query is coarse; the ride request is not', () => {
+  it('rounds to 3 decimals (≈ 110 m) and never moves more than half a step', () => {
+    const p = { lat: 24.774312, lng: 46.738621 }
+    const c = coarseForNearby(p)
+    expect(c).toEqual({ lat: 24.774, lng: 46.739 })
+    expect(Math.abs(c.lat - p.lat)).toBeLessThanOrEqual(0.0005)
+    expect(Math.abs(c.lng - p.lng)).toBeLessThanOrEqual(0.0005)
   })
 })

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { auth } from '../../auth/authService'
 import { onCrossTabSignOut } from '../../auth/session'
 import { clearServerMirror, startRideSync, syncRiderSelf } from '../../data/serverMirror'
@@ -10,7 +10,7 @@ import { Home, History, Wallet, User } from 'lucide-react'
 import { ICON, Surface, ToastHost } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
 import { clearSession, getCustomer, getSession, setSession, useAllTrips, useEco, zoneAt } from '../../core/store'
-import { UNSET_PICKUP, mayApplyFix, pickupFromFix, validatePickup } from '../../location/riderLocation'
+import { PICKUP_FREEZING_STEPS, UNSET_PICKUP, pickupFromFix, shouldApplyFix, validatePickup } from '../../location/riderLocation'
 import { useRiderLocation } from '../../location/useRiderLocation'
 import { DEMO_CURRENT } from '../../core/geo'
 import { isActive } from '../../core/trip'
@@ -54,14 +54,33 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
 
   useEco((s) => s.rev) // re-render on any store change
   const customer = getCustomer(pid)
-  const loc = useRiderLocation(stage === 'main' && !!customer)
-  // Apply a GPS fix to the pickup. An automatic fix never replaces a pickup the rider chose by hand;
-  // an explicit "Use my location" tap does. In the demo build a
-  // fix outside the demo service area is ignored (the demo city stays usable from anywhere).
+  /**
+   * F1 — pickup revision. Bumped by every manual pickup change (pin, search) and when the rider
+   * enters a screen where the pickup is edited or priced; a GPS result requested before a bump is
+   * dropped, so it can never replace a manual choice or change a quoted pickup.
+   */
+  const pickupRev = useRef(0)
+  const bumpPickup = () => {
+    pickupRev.current += 1
+  }
+  const setManualPickup = (p: Place) => {
+    bumpPickup()
+    setDraft((d) => ({ ...d, pickup: p }))
+  }
+  const loc = useRiderLocation(stage === 'main' && !!customer, () => pickupRev.current)
   useEffect(() => {
-    const pos = loc.state.status === 'located' ? loc.state.pos : undefined
-    if (!pos || (!live && !zoneAt(pos).inService)) return
-    setDraft((d) => (mayApplyFix(d.pickup, live, loc.state.byUser) ? { ...d, pickup: pickupFromFix(pos, loc.state.accuracyM) } : d))
+    if (step && (PICKUP_FREEZING_STEPS as readonly string[]).includes(step)) bumpPickup()
+  }, [step])
+  // Apply a GPS fix to the pickup when it is still wanted (see shouldApplyFix).
+  useEffect(() => {
+    const s = loc.state
+    if (s.status !== 'located' || !s.pos) return
+    const pos = s.pos
+    setDraft((d) =>
+      shouldApplyFix({ status: s.status, token: s.token, byUser: s.byUser, currentRev: pickupRev.current, current: d.pickup, live, inDemoArea: live || zoneAt(pos).inService })
+        ? { ...d, pickup: pickupFromFix(pos, s.accuracyM, s.at) }
+        : d,
+    )
   }, [loc.state, live])
   const pickupOk = validatePickup(draft.pickup, live).ok
   /** The rider must set a pickup first: open the pin screen, then continue to `next`. */
@@ -83,6 +102,17 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
       ),
     [all, pid, dismissed],
   )
+  // F2 — when a ride starts or ends (completed, cancelled, rated, dismissed), the previous pickup is
+  // obsolete in LIVE: the next ride needs a new one, by GPS or by hand. Pending GPS results are dropped.
+  const tripKey = trip?.id
+  const lastTripKey = useRef<string | undefined>(tripKey)
+  useEffect(() => {
+    if (lastTripKey.current === tripKey) return
+    lastTripKey.current = tripKey
+    if (!live) return
+    bumpPickup()
+    setDraft((d) => ({ ...d, pickup: UNSET_PICKUP }))
+  }, [tripKey, live])
 
   const recent = useMemo(() => {
     const seen = new Set<string>()
@@ -198,7 +228,7 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
           if (!pickupOk) return askPickup('vehicles')
           setStep('vehicles')
         }}
-        onEditPickup={(p) => setDraft((d) => ({ ...d, pickup: p }))}
+        onEditPickup={setManualPickup}
         onPickOnMap={(target) => {
           setPickTarget(target)
           setStep('pick')
@@ -208,19 +238,27 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
   else if (step === 'pick')
     content = (
       <MapPickScreen
+        key={pickTarget}
         target={pickTarget}
         start={pickTarget === 'pickup' ? draft.pickup : (draft.dropoff ?? draft.pickup)}
         onBack={() => {
+          // Back returns where the rider came from: the home row (→ home), the forced pickup step of
+          // a destination choice (→ destination), or the confirm screen's "Edit pickup" (→ confirm).
+          const from = pickReturn
           setPickReturn(null)
+          if (from === 'destination') return setStep(null)
+          if (from === 'vehicles') return setStep('destination')
           setStep(draft.dropoff && pickTarget === 'pickup' ? 'confirm' : 'destination')
         }}
         onConfirm={(p) => {
           if (pickTarget === 'pickup') {
-            setDraft((d) => ({ ...d, pickup: p }))
+            setManualPickup(p)
             setStep(pickReturn ?? (draft.dropoff ? 'confirm' : 'destination'))
             setPickReturn(null)
           } else {
             setDraft((d) => ({ ...d, dropoff: p }))
+            // F4: the same rule as the other destination paths — no vehicles without a valid pickup.
+            if (!pickupOk) return askPickup('vehicles')
             setStep('vehicles')
           }
         }}

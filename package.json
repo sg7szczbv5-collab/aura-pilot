@@ -17,7 +17,8 @@
     "build:share": "vite build -c vite.share.config.ts",
     "e2e:ui": "node scripts/e2e-ui-trip.cjs",
     "e2e:beta-payments": "node scripts/e2e-beta-payments.cjs",
-    "e2e:rider-gps": "node scripts/e2e-rider-gps.cjs"
+    "e2e:rider-gps": "node scripts/e2e-rider-gps.cjs",
+    "e2e:rider-gps-live": "node scripts/e2e-rider-gps-live.cjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans-arabic": "^5.3.0",

@@ -8,7 +8,7 @@ import { Crosshair, LocateFixed, MapPin, Search } from 'lucide-react'
 import type { Place } from '../../core/types'
 import { cx, ICON, Spinner } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
-import { APPROXIMATE_ACCURACY_M, GPS_PICKUP_ID, UNSET_PICKUP, type LocState, type PermissionHint } from '../../location/riderLocation'
+import { APPROXIMATE_ACCURACY_M, GPS_PICKUP_ID, UNSET_PICKUP, validatePickup, type LocState, type PermissionHint } from '../../location/riderLocation'
 
 export type PickupLocationProps = {
   pickup: Place
@@ -23,11 +23,15 @@ export function PickupLocation({ pickup, location, onPickOnMap, onSearch }: Pick
   const unset = pickup.id === UNSET_PICKUP.id
   const fromGps = pickup.id === GPS_PICKUP_ID
   const demoPoint = pickup.id === 'current' // the demo build's fixed point, never a real position
+  const stale = fromGps && !validatePickup(pickup, true).ok // F2: GPS pickup older than the limit
 
   let tone: 'ok' | 'info' | 'warn' = 'info'
   let line: string
   if (status === 'locating') line = t('جارٍ تحديد موقعك…', 'Finding your location…')
-  else if (fromGps && accuracyM && accuracyM > APPROXIMATE_ACCURACY_M) {
+  else if (stale) {
+    tone = 'warn'
+    line = t('موقعك من GPS قديم. حدّثه قبل الطلب.', 'Your GPS location is out of date. Refresh it before requesting.')
+  } else if (fromGps && accuracyM && accuracyM > APPROXIMATE_ACCURACY_M) {
     tone = 'warn'
     line = t(`موقع تقريبي (± ${Math.round(accuracyM)} م) — اضبط الدبوس`, `Approximate (± ${Math.round(accuracyM)} m) — adjust the pin`)
   } else if (fromGps) {
@@ -45,7 +49,7 @@ export function PickupLocation({ pickup, location, onPickOnMap, onSearch }: Pick
   } else if (unset) line = t('حدّد نقطة الالتقاء لطلب رحلة.', 'Set your pickup to request a ride.')
   else line = L(pickup.sub)
 
-  const canAsk = status !== 'locating' && status !== 'denied' && status !== 'unsupported' && status !== 'insecure' && !fromGps
+  const canAsk = status !== 'locating' && status !== 'denied' && status !== 'unsupported' && status !== 'insecure' && (!fromGps || stale)
   return (
     <section aria-label={t('نقطة الالتقاء', 'Pickup')} className="mb-2.5 rounded-2xl border border-line px-3 py-2.5" data-testid="pickup-location">
       <div className="flex items-center gap-2.5">
@@ -61,7 +65,7 @@ export function PickupLocation({ pickup, location, onPickOnMap, onSearch }: Pick
         {canAsk && (
           <button onClick={location.request} className="flex h-9 items-center gap-1 rounded-full bg-ink px-2.5 text-[12px] font-semibold text-white">
             <Crosshair size={14} {...ICON} />
-            {status === 'unavailable' || status === 'timeout' ? t('إعادة المحاولة', 'Try again') : t('استخدام موقعي', 'Use my location')}
+            {status === 'unavailable' || status === 'timeout' ? t('إعادة المحاولة', 'Try again') : stale ? t('تحديث موقعي', 'Refresh location') : t('استخدام موقعي', 'Use my location')}
           </button>
         )}
         <button onClick={onPickOnMap} className="flex h-9 items-center gap-1 rounded-full bg-road px-2.5 text-[12px] font-semibold">

@@ -14,8 +14,11 @@
 import type { LatLng, Place } from '../core/types'
 
 export type LocStatus = 'idle' | 'locating' | 'located' | 'denied' | 'unavailable' | 'timeout' | 'unsupported' | 'insecure'
-/** byUser: the fix came from an explicit "Use my location" tap (it may replace a manual pickup). */
-export type LocState = { status: LocStatus; pos?: LatLng; accuracyM?: number; at?: number; byUser?: boolean }
+/**
+ * byUser: the fix came from an explicit "Use my location" tap (it may replace a manual pickup).
+ * token: the pickup revision captured when the request started (F1 — stale results are dropped).
+ */
+export type LocState = { status: LocStatus; pos?: LatLng; accuracyM?: number; at?: number; byUser?: boolean; token?: number }
 export type PermissionHint = 'granted' | 'denied' | 'prompt' | 'unknown'
 
 /** Riyadh centre: where maps open before a pickup exists. It is NEVER a valid pickup by itself. */
@@ -32,7 +35,9 @@ export const UNSET_PICKUP: Place = {
 
 /** The pickup a GPS fix produces. Its id marks it as automatic, so a manual choice is never overwritten. */
 export const GPS_PICKUP_ID = 'gps-current'
-export function pickupFromFix(pos: LatLng, accuracyM?: number): Place {
+/** A GPS pickup older than this is refused at request time: the rider may have moved (F2). */
+export const MAX_GPS_PICKUP_AGE_MS = 5 * 60_000
+export function pickupFromFix(pos: LatLng, accuracyM?: number, fixedAt: number = Date.now()): Place {
   const acc = accuracyM && Number.isFinite(accuracyM) ? Math.round(accuracyM) : undefined
   return {
     id: GPS_PICKUP_ID,
@@ -40,6 +45,7 @@ export function pickupFromFix(pos: LatLng, accuracyM?: number): Place {
     sub: acc ? { ar: `دقة تقريبية ± ${acc} م`, en: `Accuracy ± ${acc} m` } : { ar: 'من GPS', en: 'From GPS' },
     pos: { lat: pos.lat, lng: pos.lng },
     kind: 'pin',
+    fixedAt,
   }
 }
 
@@ -49,17 +55,55 @@ export const APPROXIMATE_ACCURACY_M = 150
 /** Saudi Arabia, generously: anything outside is a bad fix or a bad coordinate, not a pickup. */
 const KSA = { minLat: 16, maxLat: 33, minLng: 34, maxLng: 56 }
 
-export type PickupProblem = 'unset' | 'demo_location' | 'invalid_coordinates' | 'outside_country' | 'unresolved'
+export type PickupProblem = 'unset' | 'demo_location' | 'invalid_coordinates' | 'outside_country' | 'unresolved' | 'stale_gps'
 
-/** Is this pickup acceptable for a ride request? (The server still checks the service area.) */
-export function validatePickup(p: Place | undefined, live: boolean): { ok: true } | { ok: false; problem: PickupProblem } {
+/**
+ * Is this pickup acceptable for a ride request? Client-side sanity only: the country box below is
+ * NOT the service area. The service area and restricted zones are decided by the server
+ * (create_ride), whose refusal the confirm screen shows.
+ * GPS pickups must also be fresh (fixedAt within MAX_GPS_PICKUP_AGE_MS); manual pickups (pin,
+ * search, saved place) carry no timestamp and are never refused for that.
+ */
+export function validatePickup(p: Place | undefined, live: boolean, now: number = Date.now()): { ok: true } | { ok: false; problem: PickupProblem } {
   if (!p || p.id === UNSET_PICKUP.id) return { ok: false, problem: 'unset' }
   if (live && p.id === 'current') return { ok: false, problem: 'demo_location' }
   const { lat, lng } = p.pos ?? ({} as LatLng)
   if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return { ok: false, problem: 'invalid_coordinates' }
   if (p.id.startsWith('gplace:')) return { ok: false, problem: 'unresolved' }
   if (lat < KSA.minLat || lat > KSA.maxLat || lng < KSA.minLng || lng > KSA.maxLng) return { ok: false, problem: 'outside_country' }
+  if (p.id === GPS_PICKUP_ID && (!p.fixedAt || now - p.fixedAt > MAX_GPS_PICKUP_AGE_MS || p.fixedAt > now + 60_000)) return { ok: false, problem: 'stale_gps' }
   return { ok: true }
+}
+
+/**
+ * F1 — may this GPS result change the pickup now? Every fix carries the pickup revision that was
+ * current when it was requested; any manual change (pin, search, saved place) and any move to a
+ * screen where the pickup is being priced or edited bumps the revision, so a late result is dropped.
+ */
+export function shouldApplyFix(p: { status: LocStatus; token?: number; byUser?: boolean; currentRev: number; current: Place; live: boolean; inDemoArea: boolean }): boolean {
+  if (p.status !== 'located' || p.token === undefined || p.token !== p.currentRev) return false
+  if (!p.live && !p.inDemoArea) return false // demo: a fix outside the demo city is ignored
+  return mayApplyFix(p.current, p.live, p.byUser)
+}
+
+/** Screens on which the pickup is priced or being edited: entering one freezes pending GPS results. */
+export const PICKUP_FREEZING_STEPS = ['pick', 'vehicles', 'confirm'] as const
+
+/**
+ * F5 — the nearby-cars query only needs ~100 m precision (cars come back snapped to ~200 m and the
+ * radius is kilometres). The ride request itself keeps full precision.
+ */
+export function coarseForNearby(p: LatLng, decimals = 3): LatLng {
+  const f = 10 ** decimals
+  return { lat: Math.round(p.lat * f) / f, lng: Math.round(p.lng * f) / f }
+}
+
+/** F3 — client-side zone check for the pin screen: demo only. LIVE leaves it to the server. */
+export function clientPinBlock(live: boolean, zone: { restricted?: unknown; inService: boolean }): 'restricted' | 'out_of_service' | null {
+  if (live) return null
+  if (zone.restricted) return 'restricted'
+  if (!zone.inService) return 'out_of_service'
+  return null
 }
 
 /** Should the app take a fix without a user gesture? Only when the browser already granted it. */

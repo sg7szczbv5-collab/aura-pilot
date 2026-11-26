@@ -6,6 +6,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AUTH_MODE } from '../auth/config'
+import { coarseForNearby } from '../location/riderLocation'
 import { getSupabase } from '../auth/supabaseClient'
 import { VEHICLE_CLASSES } from '../core/pricing'
 import { nearbyAvailable, quoteTrip, store, useNow } from '../core/store'
@@ -78,11 +79,13 @@ export type NearbyCar = { id: string; pos: LatLng; heading: number; classId?: Ve
 export function useNearbyCars(center: LatLng, radiusKm = 6): NearbyCar[] {
   const now = useNow(SERVER ? 60_000 : 1000)
   const [remote, setRemote] = useState<NearbyCar[]>([])
+  // F5: the server only needs ~100 m precision for this query; the ride request keeps full precision.
+  const q = coarseForNearby(center)
   useEffect(() => {
     if (!SERVER) return
     let live = true
     const load = async () => {
-      const { data } = await getSupabase().rpc('nearby_vehicle_markers', { p_lat: center.lat, p_lng: center.lng, p_radius_m: Math.round(radiusKm * 1000) })
+      const { data } = await getSupabase().rpc('nearby_vehicle_markers', { p_lat: q.lat, p_lng: q.lng, p_radius_m: Math.round(radiusKm * 1000) })
       if (!live || !Array.isArray(data)) return
       setRemote(
         (data as { lat: number; lng: number; heading: number; vehicle_class: VehicleClassId }[]).map((r, i) => ({
@@ -99,7 +102,7 @@ export function useNearbyCars(center: LatLng, radiusKm = 6): NearbyCar[] {
       live = false
       window.clearInterval(id)
     }
-  }, [center.lat, center.lng, radiusKm])
+  }, [q.lat, q.lng, radiusKm])
   const local = useMemo(
     () => (SERVER ? [] : nearbyAvailable(center, now, radiusKm).map((u) => ({ id: u.driverId, pos: u.pos, heading: u.heading, classId: u.classId }))),
     [center, now, radiusKm],
