@@ -1332,3 +1332,100 @@ describe('captain resubmission: driver_save_vehicle + re-upload + submit (migrat
     expect(d).toEqual({ status: 'pending_review', status_reason: null, current_vehicle_id: v2.id })
   })
 })
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('post-merge verification: rejection reasons (PR #1) and resubmission', () => {
+  let capP: string, capQ: string, docP: string, vehP: string
+  const nid = (n: number) => { const f = `10${String(8700000 + n)}`; return f + saudiIdCheckDigit(f) }
+
+  beforeAll(async () => {
+    capP = await newUser('966546000001', 'Verify Captain P')
+    capQ = await newUser('966546000002', 'Verify Captain Q')
+    for (const [c, n] of [[capP, 1], [capQ, 2]] as const) {
+      await acceptRequiredConsents(c, 'driver')
+      await as(c, (tx) => tx.query(`insert into drivers (id, city_id, national_id, date_of_birth, iban) values ($1, (select id from cities where code = 'riyadh'), $2, '1990-01-01', 'SA0380000000608010167519')`, [c, nid(n)]))
+    }
+    vehP = (await one<{ id: string }>(capP, `select id from driver_save_vehicle(null, 'go', 'Toyota', 'Camry', 2024, 'white', 'BJR', '4321', '765432109', 4)`)).id
+    await as(capP, async (tx) => {
+      for (const [t, v] of [['national_id', null], ['driving_license', null], ['profile_photo', null], ['vehicle_registration', vehP], ['vehicle_insurance', vehP]] as const) {
+        await tx.query(`insert into driver_documents (driver_id, vehicle_id, doc_type, storage_path, expires_at) values ($1::uuid, $2::uuid, $3::document_type, $1::text || '/' || $3::text || '-1.jpg', $4)`,
+          [capP, v, t, t === 'profile_photo' ? null : '2030-06-30'])
+      }
+    })
+    docP = (await one<{ id: string }>(capP, `select id from driver_documents where driver_id = $1 and doc_type = 'driving_license'`, [capP])).id
+    expect((await one<{ status: string }>(capP, `select (submit_driver_application()).status`)).status).toBe('pending_review')
+  })
+
+  it('driver_documents structure: reason required for rejected, review columns present, one live document per type', async () => {
+    const cols = await rows<{ column_name: string }>('service', `select column_name from information_schema.columns where table_schema = 'public' and table_name = 'driver_documents' order by ordinal_position`)
+    expect(cols.map((c) => c.column_name)).toEqual(expect.arrayContaining(['status', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'updated_at']))
+    await expect(as('service', (tx) => tx.query(`update driver_documents set status = 'rejected', rejection_reason = null where id = $1`, [docP]))).rejects.toThrow(/driver_documents_rejection_reason/)
+    await expect(as(capP, (tx) => tx.query(`insert into driver_documents (driver_id, doc_type, storage_path, expires_at) values ($1::uuid, 'driving_license', $1::text || '/dup.jpg', '2030-06-30')`, [capP]))).rejects.toThrow(/one_live/)
+  })
+
+  it('a captain cannot see or change another captain’s documents, nor an admin decision', async () => {
+    expect(await rows(capQ, `select id from driver_documents where driver_id = $1`, [capP])).toEqual([])
+    expect(await rows(capQ, `select id from vehicles where driver_id = $1`, [capP])).toEqual([])
+    // Even with the column grant from migration 016, the policy matches no row for a captain.
+    const touched = await as(capP, async (tx) => (await tx.query(`update driver_documents set status = 'rejected', rejection_reason = 'x', reviewed_by = $2 where id = $1 returning id`, [docP, capP])).rows)
+    expect(touched).toEqual([])
+    expect(await as(capP, async (tx) => (await tx.query(`update driver_documents set status = 'approved' where id = $1 returning id`, [docP])).rows)).toEqual([]) // RLS hides the row → 0 rows changed
+    await expect(as(capP, (tx) => tx.query(`update vehicles set status = 'approved' where id = $1`, [vehP]))).rejects.toThrow(/permission denied/)
+    await expect(one(capP, `select admin_review_document($1, true)`, [docP])).rejects.toThrow(/drivers.edit/)
+    await expect(one(capP, `select admin_review_vehicle($1, true)`, [vehP])).rejects.toThrow(/vehicles.edit/)
+    expect((await one<{ status: string }>('service', `select status from driver_documents where id = $1`, [docP])).status).toBe('uploaded')
+  })
+
+  it('document rejection (admin page update): reason saved, reviewed_at and updated_at set, captain sees the reason', async () => {
+    const before = await one<{ updated_at: string }>('service', `select updated_at from driver_documents where id = $1`, [docP])
+    const [r] = await as(driverManager, async (tx) => (await tx.query<{ status: string; rejection_reason: string; reviewed_at: string; updated_at: string; reviewed_by: string }>(
+      `update driver_documents set status = 'rejected', rejection_reason = $2, reviewed_at = now(), updated_at = now(), reviewed_by = $3
+        where id = $1 and status = 'uploaded' returning status, rejection_reason, reviewed_at, updated_at, reviewed_by`,
+      [docP, 'عدم وضوح الوثيقة أو رداءة التصوير', driverManager])).rows)
+    expect(r).toMatchObject({ status: 'rejected', rejection_reason: 'عدم وضوح الوثيقة أو رداءة التصوير', reviewed_by: driverManager })
+    expect(r.reviewed_at).toBeTruthy()
+    expect(Date.parse(r.updated_at)).toBeGreaterThanOrEqual(Date.parse(before.updated_at))
+    // What the captain app reads (serverMirror.syncDriverSelf):
+    expect(await one(capP, `select status, rejection_reason from driver_documents where id = $1`, [docP]))
+      .toEqual({ status: 'rejected', rejection_reason: 'عدم وضوح الوثيقة أو رداءة التصوير' })
+    const audit = await rows<{ action: string; actor_id: string }>(superAdmin, `select action, actor_id from audit_log where entity_id = $1 order by created_at`, [docP])
+    expect(audit.some((a) => a.actor_id === driverManager)).toBe(true)
+  })
+
+  it('vehicle rejection: reason saved in vehicles.status_reason and visible to the captain; approval needs approved documents', async () => {
+    await expect(one(driverManager, `select admin_review_vehicle($1, true)`, [vehP])).rejects.toThrow(/documents must be approved/)
+    await one(driverManager, `select admin_review_vehicle($1, false, 'عدم تطابق البيانات')`, [vehP])
+    expect(await one(capP, `select status, status_reason from vehicles where id = $1`, [vehP])).toEqual({ status: 'rejected', status_reason: 'عدم تطابق البيانات' })
+  })
+
+  it('resubmission keeps the review history: rejected document row and the old vehicle decision stay recorded', async () => {
+    // Re-upload the rejected licence (new row) and correct the vehicle in place.
+    await as(capP, (tx) => tx.query(`insert into driver_documents (driver_id, doc_type, storage_path, expires_at) values ($1::uuid, 'driving_license', $1::text || '/driving_license-2.jpg', '2031-01-31')`, [capP]))
+    const v = await one<{ status: string; status_reason: string | null }>(capP, `select status, status_reason from driver_save_vehicle($1, 'go', 'Toyota', 'Camry', 2024, 'white', 'BJR', '4321', '765432109', 4)`, [vehP])
+    expect(v).toEqual({ status: 'pending_review', status_reason: null })
+    const licences = await rows<{ status: string; rejection_reason: string | null }>(capP, `select status, rejection_reason from driver_documents where driver_id = $1 and doc_type = 'driving_license' order by created_at`, [capP])
+    expect(licences).toEqual([
+      { status: 'rejected', rejection_reason: 'عدم وضوح الوثيقة أو رداءة التصوير' },
+      { status: 'uploaded', rejection_reason: null },
+    ])
+    // The vehicle row is corrected in place; its previous decision is kept in the audit log.
+    const hist = await rows<{ old_reason: string | null; new_status: string | null }>(superAdmin,
+      `select old_data ->> 'status_reason' as old_reason, new_data ->> 'status' as new_status from audit_log where entity_id = $1 order by created_at`, [vehP])
+    expect(hist.some((h) => h.old_reason === 'عدم تطابق البيانات' && h.new_status === 'pending_review')).toBe(true)
+  })
+
+  it('regression: after review the captain is approved only with approved documents, vehicle and Wasl — and can then go online', async () => {
+    for (const d of await rows<{ id: string }>(driverManager, `select id from driver_documents where driver_id = $1 and status = 'uploaded'`, [capP])) {
+      await one(driverManager, `select admin_review_document($1, true)`, [d.id])
+    }
+    await one(driverManager, `select admin_review_vehicle($1, true)`, [vehP])
+    await expect(one(driverManager, `select admin_set_driver_status($1, 'approved')`, [capP])).rejects.toThrow(/Wasl/)
+    await one('service', `select record_wasl_result('driver', $1, 'eligibility_check', 'mock', true, 'WASL-VP')`, [capP])
+    await one('service', `select record_wasl_result('vehicle', $1, 'vehicle_registration', 'mock', true, 'WASL-VV')`, [vehP])
+    expect((await one<{ status: string }>(driverManager, `select (admin_set_driver_status($1, 'approved')).status`, [capP])).status).toBe('approved')
+    await as(capP, (tx) => tx.query(`update drivers set is_online = true where id = $1`, [capP]))
+    expect((await one<{ is_online: boolean }>('service', `select is_online from drivers where id = $1`, [capP])).is_online).toBe(true)
+    // Once approved, the vehicle can no longer be edited by the captain.
+    await expect(one(capP, `select driver_save_vehicle($1, 'go', 'Toyota', 'Camry', 2024, 'white', 'BJR', '4321', '765432109', 4)`, [vehP])).rejects.toThrow(/support|no longer/)
+  })
+})
