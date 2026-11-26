@@ -1,14 +1,23 @@
 /**
- * Card entry helpers. Raw card numbers go straight from the browser to Moyasar
- * (publishable key, save_only token); AURA only ever stores the token, brand,
- * last 4 digits and expiry.
+ * Card entry helpers. With Moyasar, raw card numbers go straight from the browser to Moyasar
+ * (publishable key, save_only token); AURA only ever stores the token, brand, last 4 digits
+ * and expiry. Which tokenizer is used is decided by paymentPolicy.ts: Moyasar only when chosen
+ * explicitly (VITE_PAYMENT_PROVIDER=moyasar) outside BETA; mock-only builds never reach it.
  */
 import { AUTH_MODE } from '../auth/config'
+import { decidePaymentPolicy } from './paymentPolicy'
 
 const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {}
 export const MOYASAR_PUBLISHABLE_KEY = env.VITE_MOYASAR_PUBLISHABLE_KEY?.trim() || undefined
+export const PAYMENT_POLICY = decidePaymentPolicy({
+  appEnv: env.VITE_APP_ENV,
+  mockOnlyBuild: env.VITE_AURA_PAYMENTS_MOCK_ONLY === '1',
+  provider: env.VITE_PAYMENT_PROVIDER,
+  publishableKey: MOYASAR_PUBLISHABLE_KEY,
+  authMode: AUTH_MODE,
+})
 /** Server-side PAYMENT_PROVIDER must match: mock tokens only work with the mock provider. */
-export const CARD_TOKENIZER: 'moyasar' | 'mock' = AUTH_MODE === 'supabase' && MOYASAR_PUBLISHABLE_KEY ? 'moyasar' : 'mock'
+export const CARD_TOKENIZER = PAYMENT_POLICY.tokenizer
 
 export const digitsOnly = (s: string) => s.replace(/\D/g, '')
 
@@ -58,18 +67,20 @@ export function validateCard(c: CardInput): CardCheck {
 
 export type TokenResult =
   | { ok: true; token: string; verificationUrl?: string }
-  | { ok: false; error: 'invalid_card' | 'declined' | 'network' }
+  | { ok: false; error: 'invalid_card' | 'declined' | 'network' | 'payments_disabled' }
 
 /**
  * Tokenize a card. Moyasar: POST /v1/tokens with the publishable key (save_only).
  * Mock: deterministic test tokens (4000 0000 0000 0002 is declined,
  * 4000 0000 0000 3220 needs 3-D Secure).
  */
-export async function tokenizeCard(c: CardInput, callbackUrl: string, fetchFn: typeof fetch = fetch): Promise<TokenResult> {
+export async function tokenizeCard(c: CardInput, callbackUrl: string, fetchFn: typeof fetch = fetch, tokenizer: typeof CARD_TOKENIZER = CARD_TOKENIZER): Promise<TokenResult> {
   if (!validateCard(c).ok) return { ok: false, error: 'invalid_card' }
+  // Fail closed: a misconfigured mock-only build never sends card data anywhere.
+  if (tokenizer === 'disabled') return { ok: false, error: 'payments_disabled' }
   const number = digitsOnly(c.number)
   const last4 = number.slice(-4)
-  if (CARD_TOKENIZER === 'mock') {
+  if (tokenizer === 'mock') {
     if (number === '4000000000000002') return { ok: false, error: 'declined' }
     return { ok: true, token: number === '4000000000003220' ? `tok_mock_3ds_${last4}` : `tok_mock_${last4}` }
   }

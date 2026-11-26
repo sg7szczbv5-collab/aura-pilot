@@ -58,6 +58,9 @@ export function projectRefFromUrl(url: string | undefined): string | null {
   return m ? m[1] : null
 }
 
+/** Server-side payment-gateway settings; kept identical to preflight's list (a test compares them). */
+export const SERVER_GATEWAY_SETTINGS = ['MOYASAR_SECRET_KEY', 'MOYASAR_WEBHOOK_SECRET', 'MOYASAR_API_BASE_URL'] as const
+
 /** Which live integrations the environment variables ask for. */
 export function liveRequests(env: Env): string[] {
   const out: string[] = []
@@ -65,8 +68,11 @@ export function liveRequests(env: Env): string[] {
   if (provider !== 'mock') out.push(`PAYMENT_PROVIDER=${provider}`)
   if ((env('WASL_MODE') ?? 'mock') !== 'mock') out.push(`WASL_MODE=${env('WASL_MODE')}`)
   if ((env('PAYOUT_PROVIDER') ?? 'mock') !== 'mock') out.push(`PAYOUT_PROVIDER=${env('PAYOUT_PROVIDER')}`)
-  // BETA is mock-only: any Moyasar secret (test or live) counts as a request for a live integration.
-  if ((env('MOYASAR_SECRET_KEY') ?? '') !== '') out.push(`MOYASAR_SECRET_KEY is set (${/^sk_live_/.test(env('MOYASAR_SECRET_KEY') ?? '') ? 'live' : 'non-live'})`)
+  // BETA is mock-only: any Moyasar setting (test or live) counts as a request for a live integration.
+  for (const k of SERVER_GATEWAY_SETTINGS) {
+    const v = env(k) ?? ''
+    if (v !== '') out.push(k === 'MOYASAR_SECRET_KEY' ? `${k} is set (${/^sk_live_/.test(v) ? 'live' : 'non-live'})` : `${k} is set`)
+  }
   if ((env('WASL_APP_KEY') ?? '') !== '') out.push('WASL_APP_KEY is set')
   return out
 }

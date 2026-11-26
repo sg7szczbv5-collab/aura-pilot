@@ -13,7 +13,11 @@ import './styles/index.css'
 import { App } from './app/App'
 import { I18nProvider } from './i18n/I18n'
 import { startDispatcher } from './core/store'
+import { PAYMENT_POLICY } from './payments/cards'
+import { installPaymentNetworkGuard } from './payments/networkGuard'
 
+// BETA / staging / Preview: no request may reach a payment gateway, whatever the settings say.
+installPaymentNetworkGuard(PAYMENT_POLICY.mockOnly)
 startDispatcher()
 
 createRoot(document.getElementById('root')!).render(

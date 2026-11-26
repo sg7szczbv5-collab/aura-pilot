@@ -166,7 +166,8 @@ permissions are proven by DB tests. Not run against a live project (no credentia
    URL / anon key, four worker secrets (≥ 32 chars, all different), maps keys (optional).
 4. **Payments, payouts and Wasl: `mock` only** (`PAYMENT_PROVIDER`, `VITE_PAYMENT_PROVIDER`,
    `PAYOUT_PROVIDER`, `WASL_MODE`). No Moyasar or Elm credentials of any kind in BETA: preflight
-   blocks them and the runtime guard refuses (migration 021, `docs/beta/BETA_SECURITY.md`).
+   blocks them, a staging / Preview build fails on them, the browser refuses to contact a payment
+   gateway, and the Edge runtime guard refuses (migration 021, `docs/beta/BETA_SECURITY.md`).
 5. **Staff accounts** granted with `private.grant_admin` and MFA enrolled.
 6. **pg_cron** enabled (dispatch offer expiry, document expiry, purges) — or the
    `dispatch-tick` function scheduled.

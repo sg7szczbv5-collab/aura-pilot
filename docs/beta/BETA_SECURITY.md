@@ -1,10 +1,14 @@
-# AURA BETA security (migrations 021 and 022)
+# AURA BETA security (migrations 021, 022 and 023)
 
 The controls that keep a closed BETA from moving real money, talking to Elm, or letting in strangers, and keep a BETA from ever being taken for production.
 
 - **Status:** implemented in the repository and tested on PGlite and in unit tests. **Not applied to any Supabase project. Not deployed.**
 - **Production:** live operations stay refused everywhere until `PROD_PROJECT_REF` is verified by a human (see §6).
-- **Policy:** BETA is **mock-only** for payments, payouts and Wasl. No Moyasar credential (test or live) and no Elm credential, enforced by preflight (`beta_no_provider_credentials`, `beta_no_live_keys`, `beta_wasl_mock`, `beta_payments_mock`, `beta_payouts_mock`) and by the runtime guard.
+- **Policy:** BETA is **mock-only** for payments, payouts and Wasl. No Moyasar credential (test or live) and no Elm credential. Enforced in four places:
+  1. **Preflight:** `beta_no_provider_credentials`, `beta_no_live_keys`, `beta_wasl_mock`, `beta_payments_mock` and `beta_payouts_mock`.
+  2. **The build:** `vite.config.ts` fails a staging / BETA / Vercel Preview build on any Moyasar setting or non-mock provider.
+  3. **The browser:** `src/payments/paymentPolicy.ts` selects Moyasar only when it is chosen explicitly, and never in a mock-only build. `networkGuard.ts` refuses `fetch`, XHR and `sendBeacon` to `*.moyasar.com`.
+  4. **The Edge runtime guard.**
 
 ## 1. Layers
 
@@ -21,7 +25,7 @@ The controls that keep a closed BETA from moving real money, talking to Elm, or 
 | C1 | compensating | BETA has no live credentials. Preflight blocks `sk_live_`/`pk_live_` anywhere, any non-mock payment, payout or Wasl setting, and Elm credentials. Runtime refuses the same. | `src/ops/configChecks.ts`, `runtimeGuard.ts` |
 | C2 | compensating | Identity binding: `ref(SUPABASE_URL)` = marker ref = `PROD_PROJECT_REF` (code constant, never an env var) = `ops_guard.prod_project_ref()`. | both constants are null today |
 | C3 | compensating | Closed sign-ups: disabled in GoTrue (manual), the **Before User Created** hook, a backup `BEFORE INSERT` trigger on `auth.users`, and the **Custom Access Token** hook, which also runs on refresh. | migration 021 |
-| C4 | compensating | `revoke_tester()` **always** removes the identity from the allowlist and sets `is_blocked` (every sensitive RPC refuses at once). It then *tries* to delete `auth.sessions` and `auth.refresh_tokens`, each on its own, and returns and logs (`revocation_log`) what actually happened: `deleted:n`, `failed:<sqlstate>` or `absent`. Access tokens already issued stay valid until they expire. The Auth ban is a manual Admin API step. | migrations 021, 022 |
+| C4 | compensating | `revoke_tester()` **always** removes the identity from the allowlist, sets `is_blocked` and takes a captain offline. It then *tries* to delete `auth.sessions` and `auth.refresh_tokens`, each on its own, and returns and logs (`revocation_log`) what actually happened: `deleted:n`, `failed:<sqlstate>` or `absent`. **An access token issued before the block stays valid until it expires**, so the block is enforced at the operation itself (§2b), not by revoking tokens. The Auth ban is a manual Admin API step. | migrations 021–023 |
 
 **What this does not prevent:** the database owner (`postgres`) can still undo any of it. Against the owner, protection relies on detection (D1 → D2/D3, alerts) and on C1 (no live credentials exist in BETA), not on prevention.
 
@@ -59,6 +63,23 @@ Rule: **protecting money never blocks a privacy right, and a privacy operation i
 - Who may redact is unchanged. P1 still forbids direct writes, so only postgres-owned functions get there: `erase_user` (service_role, the privacy worker) and `apply_retention` (pg_cron).
 - A redaction done while the marker is missing or corrupt, or integrity has failed, is recorded in `ops_guard.guard_exemptions` (append-only) for investigation.
 - **Tested** with a user who has real cards and Wasl payloads, in five states: healthy, marker missing, marker corrupt, integrity failed, triggers disabled. Plus 12 abuse attempts that are all refused (provider switch, un-delete, digits change, insert, Wasl payload write, provider or status change, any update on payments or payouts).
+
+## 2b. Blocked accounts (F2, migration 023)
+
+A blocked or revoked account may still hold a valid access token. Every operation checks `profiles.is_blocked` itself:
+
+| Path | What a blocked account gets |
+|---|---|
+| Money and payment methods: `request_payout`, `add_wallet_tip`, `set_default_payment_method`, `remove_payment_method`, `save_payment_method` (Edge, for the rider), `create_payment_intent`, `create_ride`, `accept_ride` | **refused** (`AURA: account is blocked`) |
+| Account and vehicle data: `rate_ride`, `driver_save_vehicle`, `submit_driver_application` | **refused** |
+| Direct (RLS) writes on `profiles`, `riders`, `drivers` (IBAN, bank, city, going online), `vehicles`, `driver_documents`, `driver_locations` | **refused** by the `aa_blocked_actor` trigger (SECURITY INVOKER, ENABLE ALWAYS) |
+| Admin RPCs | refused (`admin_can` and `is_admin` already require an unblocked profile) |
+| Finishing a trip already accepted: arrive, PIN, start, complete (`transition_ride`, `start_ride`, `issue_ride_verification_code`, `decline_ride`), in-trip chat, trip sharing, going **offline** | allowed (safety) |
+| Safety reports, support tickets, privacy requests and export, consent withdrawal | allowed (legal rights) |
+
+- The two "allowed" lists are pinned by a test: any new user-callable writer or RLS-writable table must be classified, or the suite fails.
+- The integrity check also verifies that the 8 RPC checks and the 6 triggers are in place.
+- Not covered: Storage uploads (documents, avatar files) are governed by Storage policies. A blocked account can upload a file, but cannot attach it (the `driver_documents` or `profiles` write is refused).
 
 ## 3. Privileges: before and after
 
@@ -100,6 +121,8 @@ The `ops_guard` schema:
 | F1 | `tests/db/beta_security.test.ts` | erase + retention on real rows in 5 states; live-provider card redacted without provider change; 12 abuse shapes refused; access control kept; exemptions logged |
 | F2 | same | sessions/tokens deleted and counted; a failing delete keeps allowlist removal and block, reported `failed:42501`, logged; `absent` without tables |
 | F3 | `tests/betaSecurity.test.ts` | template is mock-only with no provider credential keys; filled template passes every BETA blocker; docs contain no test-key wording (proven to catch the old text); any Moyasar secret refused |
+| F2 (023) | `tests/db/beta_security.test.ts` | the same token before and after the block for 17 operations (money, payment methods, ride creation, rating, IBAN / bank / going online, profile, rider data, vehicle, document, location); nothing written; no self-unblock; trip in progress finished (chat, share, offline, completion); unaffected account unaffected; sessions or refresh-token deletion failing separately; catalog regression guard; integrity watches the controls |
+| F3 (browser) | `tests/betaPayments.test.ts`, `scripts/e2e-beta-payments.cjs` | policy matrix (BETA with key, provider or both refused; production needs an explicit provider); tokenizer `disabled` never calls fetch; network guard blocks fetch, XHR and sendBeacon to Moyasar; build fails for each Moyasar setting in staging / Preview and passes in production; the real browser on a mock-only build sends no request to Moyasar; preflight and Edge lists identical; whole-repo doc scan |
 | F4 | `tests/db/beta_security.test.ts` | staff e-mail (case/spaces), e-mail + phone, unlisted staff refused at creation, revoked staff blocked and loses `admin_can`; integrity stays green |
 | F5 | same | no rows for repeated healthy checks; one row per failure, per new failure set, per recovery; `failing_since`; purge ≥ 365 days; recent rows undeletable even with a forged flag; audit logs undeletable |
 | F6 | both | what stops and what runs during a failure; recovery without manual reset (DB and runtime) |
@@ -186,7 +209,8 @@ The money and Wasl paths stay fail-closed; nothing sensitive runs on a failed ch
 | The marker digest is a tamper indicator, not a signature (md5 of public fields) | immutability triggers ALWAYS; no API role can reach the table | the owner can forge it; detection relies on mode/ref binding and integrity |
 | pg_cron unavailable or stopped | integrity goes stale → `/health` 503, workers refuse, live disallowed | BETA mock operations still run in the DB until a failure is recorded (staleness alone doesn't block DB writes) |
 | The Auth hooks are not configured (S6 skipped) | backup trigger on `auth.users`, GoTrue sign-ups disabled, integrity flags unlisted accounts | revocation then waits for JWT expiry plus the ban |
-| Revoked tester keeps a valid access token until it expires | `is_blocked` refuses sensitive RPCs at once; sessions and refresh tokens deleted when permitted (reported per step) | read access via RLS until JWT expiry (keep expiry short); session deletion may fail on Supabase, so the ban is mandatory |
+| Revoked tester keeps a valid access token until it expires | every money, payment-method, account and vehicle operation, and every direct write, checks `is_blocked` (§2b); sessions and refresh tokens deleted when permitted (reported per step) | **reads** via RLS (own trips, wallet, profile) until JWT expiry; finishing a trip in progress is allowed; keep the expiry short and ban the user |
+| The static CSP (`public/_headers`, `vercel.json`) still allows `connect-src https://api.moyasar.com` | needed by production tokenization; one header file serves every deployment. In BETA the build fails on any Moyasar setting, the bundle never selects Moyasar, and the network guard refuses the host | a per-environment CSP would need separate hosting projects or middleware |
 | Redaction exemption (F1) could be used by the owner to soft-delete cards or null Wasl payloads in a degraded state | shape-restricted (no provider, amount or status change; no insert); logged in `guard_exemptions` | the owner can already do anything (see first row) |
 | Cash rides stop during an integrity outage (F6) | 1-minute schedule, `/health` alert, automatic recovery | short service interruption for new requests |
 | Moyasar test mode cannot be exercised in BETA (any non-mock payment is refused) | by design (strictest) | a separate reviewed change would be needed for a sandbox mode |

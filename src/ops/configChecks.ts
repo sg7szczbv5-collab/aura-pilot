@@ -11,6 +11,7 @@ export type Target = 'development' | 'staging' | 'production'
 export type Env = Record<string, string | undefined>
 
 import { PROD_PROJECT_REF, projectRefFromUrl } from './prodBinding'
+import { GATEWAY_SETTINGS } from '../payments/paymentPolicy'
 
 const MIN_SECRET = 32
 const PLACEHOLDER = /your-project-ref|your-anon|changeme|example|xxxx|<.*>/i
@@ -89,6 +90,9 @@ export function checkConfig(env: Env, target: Target, prodRef: string | null = P
   const cb = env.PAYMENT_CALLBACK_URL ?? ''
   add('payment_callback', 'payments', blockerIf(prod), !prod || (/^https:\/\//.test(cb) && !/localhost|127\.0\.0\.1/.test(cb) && cb.includes('#/passenger')),
     prod ? `3-D Secure return URL: ${cb || '(unset)'}` : 'Callback URL only checked for production')
+  // The browser uses Moyasar only when it is chosen explicitly (F3): a key alone is not enough.
+  if (prod) add('browser_payment_provider', 'payments', 'blocker', env.VITE_PAYMENT_PROVIDER === 'moyasar' && has(env.VITE_MOYASAR_PUBLISHABLE_KEY),
+    `VITE_PAYMENT_PROVIDER=${env.VITE_PAYMENT_PROVIDER ?? '(unset)'} — production cards need VITE_PAYMENT_PROVIDER=moyasar and the publishable key`)
   add('payment_provider_matches_app', 'payments', 'warning', (env.VITE_PAYMENT_PROVIDER ?? 'mock') === provider || (provider === 'moyasar' && has(env.VITE_MOYASAR_PUBLISHABLE_KEY)),
     'Browser tokenization and server provider agree (mock tokens only work with the mock provider)')
 
@@ -122,7 +126,7 @@ export function checkConfig(env: Env, target: Target, prodRef: string | null = P
     add('beta_payments_mock', 'beta', 'blocker', provider === 'mock' && (env.VITE_PAYMENT_PROVIDER ?? 'mock') === 'mock', `BETA payments must be mock (PAYMENT_PROVIDER=${provider}, VITE_PAYMENT_PROVIDER=${env.VITE_PAYMENT_PROVIDER ?? 'mock'})`)
     add('beta_no_live_keys', 'beta', 'blocker', !/^sk_live_/.test(sk) && !/^pk_live_/.test(pk) && !Object.values(env).some((v) => typeof v === 'string' && /^(sk|pk)_live_/.test(v)),
       'No Moyasar live key (sk_live_/pk_live_) anywhere in the BETA configuration')
-    const moyasarCreds = ['MOYASAR_SECRET_KEY', 'VITE_MOYASAR_PUBLISHABLE_KEY', 'MOYASAR_WEBHOOK_SECRET', 'MOYASAR_API_BASE_URL'].filter((k) => (env[k] ?? '').trim() !== '')
+    const moyasarCreds = GATEWAY_SETTINGS.filter((k) => (env[k] ?? '').trim() !== '')
     add('beta_no_provider_credentials', 'beta', 'blocker', moyasarCreds.length === 0,
       moyasarCreds.length === 0 ? 'No Moyasar credential of any kind (test or live) in BETA' : `Remove from BETA (mock only): ${moyasarCreds.join(', ')}`)
     add('beta_wasl_mock', 'beta', 'blocker', wasl === 'mock' && !has(env.WASL_APP_KEY) && !has(env.WASL_APP_ID), `BETA Wasl must be mock with no Elm credentials (WASL_MODE=${wasl})`)
