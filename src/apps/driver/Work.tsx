@@ -17,6 +17,9 @@ import { offerAlert } from '../../captain/offerAlert'
 import { useOfferAlertStatus, useRingForOffer } from '../../captain/useOfferAlert'
 import { isIOS, navTarget, navUrl, openNav, type NavApp } from '../../captain/navLinks'
 import type { RideActionResult } from '../../captain/rideAction'
+import { screenWakeLock } from '../../captain/wakeLock'
+import type { Away } from '../../captain/backgroundWatch'
+import type { GpsState } from '../../data/liveHooks'
 
 /** A2.3 — what the captain is told when an operation was not confirmed by the server. */
 function useActionFeedback() {
@@ -31,7 +34,7 @@ function useActionFeedback() {
 
 /* ============================== HOME ============================== */
 
-export function DriverHome({ driver, onInbox, inboxCount, onPerformance }: { driver: Driver; onInbox: () => void; inboxCount: number; onPerformance: () => void }) {
+export function DriverHome({ driver, onInbox, inboxCount, onPerformance, gps }: { driver: Driver; onInbox: () => void; inboxCount: number; onPerformance: () => void; gps?: { state: GpsState; lastSentAt: number | null } }) {
   const { t, L } = useI18n()
   const toast = useToast()
   const pos = useEco((s) => s.positions[driver.id]) ?? { lat: 24.7372, lng: 46.6598 }
@@ -80,9 +83,7 @@ export function DriverHome({ driver, onInbox, inboxCount, onPerformance }: { dri
             <span className="text-[11px] text-white/50">{t('اليوم', 'Today')}</span>
             <Money h={today.net} size="md" />
           </div>
-          <span className="flex items-center gap-1.5 rounded-full bg-ink-2/90 px-2.5 py-1 text-[10.5px] font-semibold text-white/70 ring-1 ring-white/8">
-            <Satellite size={12} className="text-go" /> GPS {t('قوي', 'strong')} · {t('موقع تجريبي', 'demo location')}
-          </span>
+          <GpsChip gps={gps} online={online} />
         </div>
         <IconButton tone="dark" label={t('الأداء', 'Performance')} onClick={onPerformance} className="pointer-events-auto">
           <Star size={19} {...ICON} />
@@ -96,6 +97,7 @@ export function DriverHome({ driver, onInbox, inboxCount, onPerformance }: { dri
           {online && <Badge tone="live">{t('بانتظار طلب', 'Waiting for trips')}</Badge>}
         </div>
         {online && <AlertStatusRow />}
+        {online && <KeepAwakeRow />}
         <div className="grid grid-cols-3 gap-2">
           <Kpi label={t('رحلات اليوم', 'Trips today')} value={String(today.count)} />
           <Kpi label={t('دخل اليوم', 'Earned today')} value={sar(today.net, 0)} unit="SAR" />
@@ -128,6 +130,79 @@ function Kpi({ label, value, unit }: { label: string; value: string; unit?: stri
         {unit && <span className="ms-1 text-[10px] text-white/45">{unit}</span>}
       </p>
       <p className="text-[11px] text-white/50">{label}</p>
+    </div>
+  )
+}
+
+/**
+ * A2.4 — the GPS chip tells the truth: in LIVE it reflects the real stream (and when the server last
+ * accepted a position); the demo build says it is a demo location.
+ */
+function GpsChip({ gps, online }: { gps?: { state: GpsState; lastSentAt: number | null }; online: boolean }) {
+  const { t } = useI18n()
+  const now = useNow(5000)
+  let tone: 'ok' | 'warn' | 'off' = 'off'
+  let text: string
+  if (!gps) {
+    tone = 'ok'
+    text = `GPS · ${t('موقع تجريبي', 'demo location')}`
+  } else if (!online || gps.state === 'off') text = t('GPS متوقف (غير متصل)', 'GPS off (offline)')
+  else if (gps.state === 'live') {
+    const age = gps.lastSentAt ? Math.round((now - gps.lastSentAt) / 1000) : null
+    tone = age !== null && age > 60 ? 'warn' : 'ok'
+    text = age === null ? t('GPS متصل', 'GPS live') : age > 60 ? t(`آخر موقع أُرسل قبل ${Math.round(age / 60)} د`, `Last position sent ${Math.round(age / 60)} min ago`) : t('GPS متصل · يُرسل موقعك', 'GPS live · sending your position')
+  } else if (gps.state === 'waiting') {
+    tone = 'warn'
+    text = t('بانتظار إشارة GPS…', 'Waiting for GPS…')
+  } else {
+    tone = 'warn'
+    text = gps.state === 'denied' ? t('إذن الموقع مرفوض', 'Location permission denied') : t('GPS غير مدعوم', 'GPS not supported')
+  }
+  return (
+    <span className="flex items-center gap-1.5 rounded-full bg-ink-2/90 px-2.5 py-1 text-[10.5px] font-semibold text-white/70 ring-1 ring-white/8" data-testid="gps-chip" data-state={gps ? gps.state : 'demo'}>
+      <Satellite size={12} className={tone === 'ok' ? 'text-go' : tone === 'warn' ? 'text-amber-300' : 'text-white/40'} /> {text}
+    </span>
+  )
+}
+
+/** A2.4 — keep the screen on while online; say so, or say why it is not possible. */
+function KeepAwakeRow() {
+  const { t } = useI18n()
+  const [s, setS] = useState(screenWakeLock.status())
+  useEffect(() => screenWakeLock.subscribe(() => setS(screenWakeLock.status())), [])
+  const text: Record<string, string> = {
+    on: t('الشاشة ستبقى مضاءة ما دمت متصلاً. أبقِ AURA مفتوحاً لاستقبال الطلبات.', 'The screen stays on while you are online. Keep AURA open to receive requests.'),
+    pending: t('جارٍ إبقاء الشاشة مضاءة…', 'Keeping the screen on…'),
+    released: t('أُطفئت الشاشة أو انتقلت لتطبيق آخر. أبقِ AURA مفتوحاً لاستقبال الطلبات.', 'The screen went off or you switched apps. Keep AURA open to receive requests.'),
+    off: t('أبقِ AURA مفتوحاً والشاشة مضاءة لاستقبال الطلبات.', 'Keep AURA open with the screen on to receive requests.'),
+    unsupported: t('متصفحك لا يستطيع إبقاء الشاشة مضاءة. عطّل القفل التلقائي مؤقتاً وأبقِ AURA مفتوحاً، وإلا لن تصلك الطلبات.', 'Your browser cannot keep the screen on. Turn off auto-lock for now and keep AURA open, or requests will not reach you.'),
+    failed: t('تعذّر إبقاء الشاشة مضاءة (قد يكون وضع توفير الطاقة مفعّلاً). أبقِ AURA مفتوحاً.', 'Could not keep the screen on (battery saver may be on). Keep AURA open.'),
+  }
+  return (
+    <p className={cx('mb-3 text-[11.5px]', s === 'on' ? 'text-white/55' : 'text-amber-300')} data-testid="wake-status" data-state={s}>
+      {text[s]}
+    </p>
+  )
+}
+
+/** A2.4 — shown when the captain comes back after the app was in the background while online. */
+export function BackgroundNotice({ away, onClose }: { away: Away; onClose: () => void }) {
+  const { t } = useI18n()
+  const mins = Math.floor(away.awayMs / 60_000)
+  const secs = Math.round((away.awayMs % 60_000) / 1000)
+  const dur = mins ? t(`${mins} د ${secs} ث`, `${mins} min ${secs} s`) : t(`${secs} ث`, `${secs} s`)
+  return (
+    <div className="absolute inset-x-3 z-50 rounded-2xl bg-white p-4 text-ink shadow-2xl" style={{ top: 'calc(var(--safe-top) + 64px)' }} role="alert" data-testid="background-notice" data-out={away.outOfDispatch ? '1' : '0'}>
+      <p className="font-semibold">{t(`كان AURA في الخلفية لمدة ${dur}`, `AURA was in the background for ${dur}`)}</p>
+      <p className="mt-1 text-[13px] text-mute">
+        {away.outOfDispatch
+          ? t('خلال هذه المدة لم يكن موقعك يصل إلى الخادم، فلم تُرسل إليك طلبات جديدة. تم تحديث حالتك الآن.', 'During that time your position did not reach the server, so no new requests were sent to you. Your status is up to date now.')
+          : t('قد تكون فاتتك طلبات خلال هذه المدة. تم تحديث حالتك الآن.', 'You may have missed requests during that time. Your status is up to date now.')}
+      </p>
+      <p className="mt-1 text-[12px] text-mute">{t('لاستقبال الطلبات: أبقِ AURA مفتوحاً والشاشة مضاءة.', 'To receive requests: keep AURA open with the screen on.')}</p>
+      <Button size="sm" className="mt-3" onClick={onClose}>
+        {t('حسناً', 'OK')}
+      </Button>
     </div>
   )
 }
@@ -367,9 +442,10 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
                 )}
               </div>
             )}
-            <button onClick={() => setReveal(!reveal)} className="mx-auto mt-3 flex items-center gap-1.5 text-xs text-white/45">
+            {/* Demo only: the rider's code is never on a LIVE captain's phone. */}
+            {trips.mode !== 'supabase' && <button onClick={() => setReveal(!reveal)} className="mx-auto mt-3 flex items-center gap-1.5 text-xs text-white/45">
               <Eye size={14} /> {reveal ? <span className="num tracking-widest text-white">{trip.otp}</span> : t('تجريبي: إظهار رمز الراكب', 'Demo: reveal rider code')}
-            </button>
+            </button>}
             <div className="mt-3 grid grid-cols-3 gap-2">
               <Button variant="soft" onClick={() => setSheet('chat')} icon={<MessageSquare size={17} />}>
                 {t('رسالة', 'Message')}

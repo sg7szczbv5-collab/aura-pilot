@@ -144,6 +144,9 @@ const resync = (p) => p.evaluate(() => document.dispatchEvent(new Event('visibil
     check(/اتصل الآن/.test(await body(page)), 'LIVE captain signed in (home, offline)')
     await page.getByRole('button', { name: 'اتصل الآن' }).click(); await page.waitForTimeout(2500)
     check(be.s.online && be.s.gps > 0, `online on the server and GPS streaming (${be.s.gps} fixes)`)
+    const chip = page.locator('[data-testid=gps-chip]')
+    check((await chip.getAttribute('data-state')) === 'live' && !/تجريبي/.test(await chip.innerText()), `A2.4 LIVE: GPS chip shows the real stream, not "demo location" (${await chip.innerText()})`)
+    check((await page.locator('[data-testid=wake-status]').count()) === 1, 'A2.4 LIVE: keep-the-screen-on status shown while online')
 
     // ── accept: the server applied it, the answer was lost ─────────────────────────────────────
     be.offer(1)
@@ -170,6 +173,7 @@ const resync = (p) => p.evaluate(() => document.dispatchEvent(new Event('visibil
     await page.waitForTimeout(1500)
     await page.locator('[data-testid=mark-arrived]').click(); await page.waitForTimeout(2500)
     check(be.s.rides[0].status === 'driver_arrived' && /تحقق من الراكب/.test(await body(page)), 'arrived after reconnecting → confirmed')
+    check(!/إظهار رمز الراكب/.test(await body(page)), 'A2.4 LIVE: no "reveal rider code" demo helper')
     check(be.s.calls.filter((c) => c === 'transition_ride:driver_arrived').length === 1, `one arrived transition reached the server (${be.s.calls.filter((c) => c.includes('driver_arrived')).join(', ')})`)
 
     // ── start: the server started it, the answer was lost ──────────────────────────────────────

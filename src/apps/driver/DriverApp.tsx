@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { auth } from '../../auth/authService'
 import { onCrossTabSignOut } from '../../auth/session'
 import { clearServerMirror, startRideSync } from '../../data/serverMirror'
 import { trips as tripGateway } from '../../data/tripGateway'
 import { useDriverGps } from '../../data/liveHooks'
 import { ConnectivityBanner } from '../shared/ConnectivityBanner'
+import { screenWakeLock } from '../../captain/wakeLock'
+import { createBackgroundWatch, type Away } from '../../captain/backgroundWatch'
+import { BackgroundNotice } from './Work'
 import { ConsentScreen, useConsentGate } from '../../privacy/ConsentScreen'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Home, History, Wallet, User } from 'lucide-react'
@@ -79,7 +82,29 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
     if (auth.mode !== 'supabase' || stage !== 'main' || !did) return
     return startRideSync('driver', did)
   }, [stage, did])
-  const gps = useDriverGps(auth.mode === 'supabase' && stage === 'main' && !!driver?.online)
+  const { state: gps, lastSentAt } = useDriverGps(auth.mode === 'supabase' && stage === 'main' && !!driver?.online)
+  const online = stage === 'main' && !!driver?.online
+  // A2.4: keep the screen on only while the captain is online; released when offline / signed out.
+  useEffect(() => {
+    void screenWakeLock.want(online)
+  }, [online])
+  useEffect(() => () => void screenWakeLock.want(false), [])
+  // A2.4: tell the captain, honestly, what a stay in the background meant (resync runs in serverMirror).
+  const [away, setAway] = useState<Away | null>(null)
+  const watch = useMemo(() => createBackgroundWatch(() => Date.now()), [])
+  const onlineRef = useRef(online)
+  onlineRef.current = online
+  useEffect(() => {
+    const f = () => {
+      if (document.visibilityState === 'hidden') watch.hidden(onlineRef.current)
+      else {
+        const a = watch.visible(onlineRef.current)
+        if (a) setAway(a)
+      }
+    }
+    document.addEventListener('visibilitychange', f)
+    return () => document.removeEventListener('visibilitychange', f)
+  }, [watch])
 
   useEffect(() => onCrossTabSignOut('driver', resetLocal), [resetLocal])
   useEffect(() => {
@@ -131,7 +156,7 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
         <div className="relative flex-1">
           <AnimatePresence mode="wait">
             <motion.div key={tab} {...screenMotion} className="absolute inset-0">
-              {tab === 'home' && <DriverHome driver={driver} inboxCount={inboxCount} onInbox={() => setInbox(true)} onPerformance={() => setPerf(true)} />}
+              {tab === 'home' && <DriverHome driver={driver} inboxCount={inboxCount} onInbox={() => setInbox(true)} onPerformance={() => setPerf(true)} gps={auth.mode === 'supabase' ? { state: gps, lastSentAt } : undefined} />}
               {tab === 'trips' && <DriverTripsTab driver={driver} />}
               {tab === 'earnings' && <EarningsTab driver={driver} />}
               {tab === 'account' && (
@@ -173,6 +198,7 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
         <div dir={dir} className="absolute inset-0 overflow-hidden bg-ink font-sans text-white">
           {content}
           {auth.mode === 'supabase' && stage === 'main' && <ConnectivityBanner />}
+          {away && <BackgroundNotice away={away} onClose={() => setAway(null)} />}
           {(gps === 'denied' || gps === 'unsupported') && (
             <div className="absolute inset-x-3 z-50 rounded-2xl bg-danger px-4 py-2.5 text-center text-[12.5px] font-semibold text-white" style={{ top: 'calc(var(--safe-top) + 8px)' }}>
               {t('اسمح بالوصول إلى الموقع لتستقبل الطلبات. موقعك يُرسل فقط أثناء الاتصال.', 'Allow location access to receive trips. Location is only sent while you are online.')}

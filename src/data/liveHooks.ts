@@ -125,8 +125,10 @@ export function etaFromCars(cars: NearbyCar[], pickup: LatLng, classId: VehicleC
 export type GpsState = 'off' | 'waiting' | 'live' | 'denied' | 'unsupported'
 
 /** While online (supabase mode), stream the phone's GPS to the server every ~4 s / 25 m. */
-export function useDriverGps(enabled: boolean): GpsState {
+/** A2.4: `lastSentAt` — when the server last accepted a position (shown to the captain). */
+export function useDriverGps(enabled: boolean): { state: GpsState; lastSentAt: number | null } {
   const [state, setState] = useState<GpsState>('off')
+  const [lastSentAt, setLastSentAt] = useState<number | null>(null)
   const last = useRef<{ at: number; lat: number; lng: number } | null>(null)
 
   useEffect(() => {
@@ -165,7 +167,10 @@ export function useDriverGps(enabled: boolean): GpsState {
           if (error && isNetworkError(error)) {
             last.current = null
             connectivity.requestFailed()
-          } else if (!error) connectivity.requestAnswered()
+          } else if (!error) {
+            connectivity.requestAnswered()
+            setLastSentAt(Date.now())
+          }
         })
     }
     const opts = { enableHighAccuracy: true, maximumAge: 2000, timeout: 20_000 }
@@ -182,5 +187,5 @@ export function useDriverGps(enabled: boolean): GpsState {
     }
   }, [enabled])
 
-  return state
+  return { state, lastSentAt }
 }
