@@ -7,6 +7,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AUTH_MODE } from '../auth/config'
 import { coarseForNearby } from '../location/riderLocation'
+import { connectivity } from './connectivity'
+import { isNetworkError } from '../captain/rideAction'
 import { getSupabase } from '../auth/supabaseClient'
 import { VEHICLE_CLASSES } from '../core/pricing'
 import { nearbyAvailable, quoteTrip, store, useNow } from '../core/store'
@@ -137,31 +139,47 @@ export function useDriverGps(enabled: boolean): GpsState {
       return
     }
     setState('waiting')
-    const id = navigator.geolocation.watchPosition(
-      (p) => {
-        const { latitude: lat, longitude: lng, heading, speed, accuracy } = p.coords
-        const now = Date.now()
-        const prev = last.current
-        const moved = prev ? haversineKm({ lat, lng }, { lat: prev.lat, lng: prev.lng }) * 1000 : Infinity
-        if (prev && now - prev.at < 4000 && moved < 25) return
-        last.current = { at: now, lat, lng }
-        setState('live')
-        const h = heading !== null && !Number.isNaN(heading) ? heading : 0
-        // Show the captain's own position immediately on their active trip.
-        const active = store.state.trips.find((t) => t.server && t.driverId && ['driver_arriving', 'driver_arrived', 'in_progress', 'driver_assigned'].includes(t.status))
-        if (active) setLive(active.id, lat, lng, h, now)
-        void getSupabase().rpc('update_driver_location', {
+    const onFix = (p: GeolocationPosition) => {
+      const { latitude: lat, longitude: lng, heading, speed, accuracy } = p.coords
+      const now = Date.now()
+      const prev = last.current
+      const moved = prev ? haversineKm({ lat, lng }, { lat: prev.lat, lng: prev.lng }) * 1000 : Infinity
+      if (prev && now - prev.at < 4000 && moved < 25) return
+      last.current = { at: now, lat, lng }
+      setState('live')
+      const h = heading !== null && !Number.isNaN(heading) ? heading : 0
+      // Show the captain's own position immediately on their active trip.
+      const active = store.state.trips.find((t) => t.server && t.driverId && ['driver_arriving', 'driver_arrived', 'in_progress', 'driver_assigned'].includes(t.status))
+      if (active) setLive(active.id, lat, lng, h, now)
+      void getSupabase()
+        .rpc('update_driver_location', {
           p_lat: lat,
           p_lng: lng,
           p_heading: h,
           p_speed_kmh: speed !== null && speed >= 0 ? speed * 3.6 : null,
           p_accuracy_m: accuracy ?? null,
         })
-      },
-      (e) => setState(e.code === e.PERMISSION_DENIED ? 'denied' : 'waiting'),
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 20_000 },
-    )
-    return () => navigator.geolocation.clearWatch(id)
+        .then(({ error }) => {
+          // A2.3: a fix lost to the network is not retried as-is (it would be stale); the next fix —
+          // or the fresh one taken when the connection returns — replaces it.
+          if (error && isNetworkError(error)) {
+            last.current = null
+            connectivity.requestFailed()
+          } else if (!error) connectivity.requestAnswered()
+        })
+    }
+    const opts = { enableHighAccuracy: true, maximumAge: 2000, timeout: 20_000 }
+    const id = navigator.geolocation.watchPosition(onFix, (e) => setState(e.code === e.PERMISSION_DENIED ? 'denied' : 'waiting'), opts)
+    // A2.3: back online → send a FRESH position at once (watchPosition may stay quiet while parked).
+    const offConn = connectivity.subscribe((online) => {
+      if (!online) return
+      last.current = null
+      navigator.geolocation.getCurrentPosition(onFix, () => undefined, { ...opts, maximumAge: 10_000 })
+    })
+    return () => {
+      offConn()
+      navigator.geolocation.clearWatch(id)
+    }
   }, [enabled])
 
   return state

@@ -8,7 +8,9 @@
 import { AUTH_MODE } from '../auth/config'
 import { getSupabase } from '../auth/supabaseClient'
 import { actions, store, type TripRequest } from '../core/store'
-import type { Actor, Place, TripRating, VehicleClassId } from '../core/types'
+import type { Actor, Place, Trip, TripRating, VehicleClassId } from '../core/types'
+import { isActive } from '../core/trip'
+import { isNetworkError, runRideAction, type AttemptResult, type Confirmation, type RideActionResult } from '../captain/rideAction'
 import { refreshRide, syncDriverSelf } from './serverMirror'
 import { validatePickup } from '../location/riderLocation'
 
@@ -34,11 +36,12 @@ export interface TripGateway {
   readonly mode: 'mock' | 'supabase'
   requestTrip(req: TripRequestWithCard): Promise<RequestResult>
   cancelTrip(tripId: string, actor: Actor, reason: string): Promise<boolean>
-  acceptOffer(tripId: string, driverId: string): Promise<boolean>
+  /** A2.3: captain operations report what the server confirmed (see captain/rideAction.ts). */
+  acceptOffer(tripId: string, driverId: string): Promise<RideActionResult>
   declineOffer(tripId: string, driverId: string): Promise<void>
-  markArrived(tripId: string): Promise<boolean>
-  startTrip(tripId: string, code: string): Promise<boolean>
-  completeTrip(tripId: string): Promise<boolean>
+  markArrived(tripId: string): Promise<RideActionResult>
+  startTrip(tripId: string, code: string): Promise<RideActionResult>
+  completeTrip(tripId: string): Promise<RideActionResult>
   rateDriver(tripId: string, rating: TripRating): Promise<void>
   rateRider(tripId: string, rating: TripRating): Promise<void>
   setOnline(driverId: string, online: boolean): Promise<OnlineResult>
@@ -61,6 +64,9 @@ export function requestErrorFrom(message: string): RequestError {
 
 /* ============================== MOCK ============================== */
 
+/** Demo store: synchronous and local, so the answer IS the state. */
+const local = (ok: boolean): RideActionResult => (ok ? { ok: true, via: 'response' } : { ok: false, reason: 'rejected' })
+
 const mockGateway: TripGateway = {
   mode: 'mock',
   async requestTrip(req) {
@@ -71,19 +77,19 @@ const mockGateway: TripGateway = {
     return !!actions.cancelTrip(id, actor, reason)
   },
   async acceptOffer(id, driverId) {
-    return !!actions.acceptOffer(id, driverId)
+    return local(!!actions.acceptOffer(id, driverId))
   },
   async declineOffer(id, driverId) {
     actions.declineOffer(id, driverId)
   },
   async markArrived(id) {
-    return !!actions.markArrived(id)
+    return local(!!actions.markArrived(id))
   },
   async startTrip(id, code) {
-    return !!actions.startTrip(id, code)
+    return local(!!actions.startTrip(id, code))
   },
   async completeTrip(id) {
-    return !!actions.completeTrip(id)
+    return local(!!actions.completeTrip(id))
   },
   async rateDriver(id, rating) {
     actions.rateDriver(id, rating)
@@ -142,6 +148,30 @@ async function rpcOk(fn: string, args: Record<string, unknown>): Promise<boolean
   return !error
 }
 
+/** One RPC call as an attempt: success, a network failure, or the database refusing. */
+async function rpcAttempt(fn: string, args: Record<string, unknown>): Promise<AttemptResult> {
+  const { error } = await getSupabase().rpc(fn, args)
+  return error ? { ok: false, network: isNetworkError(error), message: error.message } : { ok: true }
+}
+
+const ASSIGNED = new Set(['driver_assigned', 'driver_arriving', 'driver_arrived', 'in_progress', 'completed'])
+const ARRIVING_OR_LATER = new Set(['driver_arriving', 'driver_arrived', 'in_progress', 'completed'])
+
+/** Re-read the ride from the server and judge it. No answer → 'unknown' (never a guess). */
+async function confirmRide(id: string, judge: (t: Trip) => Confirmation): Promise<Confirmation> {
+  const t = await refreshRide(id)
+  return t ? judge(t) : 'unknown'
+}
+
+/** transition_ride to `to`, judged by the server's status afterwards. */
+function advance(id: string, to: 'driver_arriving' | 'driver_arrived' | 'completed', judge: (status: string) => Confirmation) {
+  return runRideAction({
+    key: `${id}:${to}`,
+    attempt: () => rpcAttempt('transition_ride', { p_ride_id: id, p_to: to }),
+    confirm: () => confirmRide(id, (t) => judge(t.status)),
+  })
+}
+
 /** Exported for tests; screens use `trips`. */
 export const serverGateway: TripGateway = {
   mode: 'supabase',
@@ -155,20 +185,34 @@ export const serverGateway: TripGateway = {
     return { ok: true, tripId: data.rideId, transactionUrl: data.transactionUrl }
   },
   async cancelTrip(id, _actor, reason) {
-    const ok = await rpcOk('transition_ride', { p_ride_id: id, p_to: 'cancelled', p_reason: reason })
+    // Same-state transitions are no-ops on the server, so a retry after a lost answer is safe.
+    const r = await runRideAction({
+      key: `${id}:cancel`,
+      attempt: () => rpcAttempt('transition_ride', { p_ride_id: id, p_to: 'cancelled', p_reason: reason }),
+      confirm: () => confirmRide(id, (t) => (t.status === 'cancelled' ? 'done' : isActive(t.status) ? 'pending' : 'impossible')),
+    })
     await refreshRide(id)
-    return ok
+    return r.ok
   },
-  async acceptOffer(id) {
-    const { error } = await getSupabase().rpc('accept_ride', { p_ride_id: id })
-    if (error) {
+  async acceptOffer(id, driverId) {
+    // accept_ride is NOT idempotent (it only accepts a 'searching' ride): a retry after a lost success
+    // is refused. The server read decides: the ride is mine → accepted.
+    const accepted = await runRideAction({
+      key: `${id}:accept`,
+      attempt: () => rpcAttempt('accept_ride', { p_ride_id: id }),
+      confirm: () =>
+        confirmRide(id, (t) =>
+          t.driverId === driverId && ASSIGNED.has(t.status) ? 'done' : t.status === 'searching' && t.offer?.driverId === driverId && t.offer.expiresAt > Date.now() ? 'pending' : 'impossible',
+        ),
+    })
+    if (!accepted.ok) {
       await refreshRide(id)
-      return false
+      return accepted
     }
-    // The captain starts navigating immediately.
-    await rpcOk('transition_ride', { p_ride_id: id, p_to: 'driver_arriving' })
+    // The captain starts navigating immediately (also completes an accept whose follow-up was lost).
+    await advance(id, 'driver_arriving', (s) => (s === 'driver_assigned' ? 'pending' : ARRIVING_OR_LATER.has(s) ? 'done' : 'impossible'))
     await refreshRide(id)
-    return true
+    return accepted
   },
   async declineOffer(id) {
     await rpcOk('decline_ride', { p_ride_id: id })
@@ -178,19 +222,30 @@ export const serverGateway: TripGateway = {
     })
   },
   async markArrived(id) {
-    const ok = await rpcOk('transition_ride', { p_ride_id: id, p_to: 'driver_arrived' })
+    // An accept whose follow-up (→ arriving) was lost would make 'arrived' an illegal jump: finish it first.
+    if (store.state.trips.find((t) => t.id === id)?.status === 'driver_assigned') await advance(id, 'driver_arriving', (s) => (s === 'driver_assigned' ? 'pending' : ARRIVING_OR_LATER.has(s) ? 'done' : 'impossible'))
+    const r = await advance(id, 'driver_arrived', (s) => (s === 'driver_arriving' || s === 'driver_assigned' ? 'pending' : s === 'driver_arrived' || s === 'in_progress' || s === 'completed' ? 'done' : 'impossible'))
     await refreshRide(id)
-    return ok
+    return r
   },
   async startTrip(id, code) {
-    const { data, error } = await getSupabase().rpc('start_ride', { p_ride_id: id, p_code: code })
+    // start_ride refuses a second call once the ride is in progress: the server read decides.
+    const r = await runRideAction({
+      key: `${id}:start`,
+      attempt: async () => {
+        const { data, error } = await getSupabase().rpc('start_ride', { p_ride_id: id, p_code: code })
+        if (error) return { ok: false, network: isNetworkError(error), message: error.message }
+        return data === true ? { ok: true } : { ok: false, network: false, message: 'wrong_code' }
+      },
+      confirm: () => confirmRide(id, (t) => (t.status === 'in_progress' || t.status === 'completed' ? 'done' : t.status === 'driver_arrived' ? 'pending' : 'impossible')),
+    })
     await refreshRide(id)
-    return !error && data === true
+    return r
   },
   async completeTrip(id) {
-    const ok = await rpcOk('transition_ride', { p_ride_id: id, p_to: 'completed' })
+    const r = await advance(id, 'completed', (s) => (s === 'in_progress' ? 'pending' : s === 'completed' ? 'done' : 'impossible'))
     await refreshRide(id)
-    return ok
+    return r
   },
   async rateDriver(id, rating) {
     // Tips are part of payments (Stage 5); the rating and comment are stored now.

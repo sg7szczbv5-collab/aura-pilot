@@ -8,6 +8,7 @@ import { ConsentScreen, useConsentGate } from '../../privacy/ConsentScreen'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Home, History, Wallet, User } from 'lucide-react'
 import { ICON, Surface, ToastHost } from '../../ds/ui'
+import { ConnectivityBanner } from '../shared/ConnectivityBanner'
 import { useI18n } from '../../i18n/I18n'
 import { clearSession, getCustomer, getSession, setSession, useAllTrips, useEco, zoneAt } from '../../core/store'
 import { PICKUP_FREEZING_STEPS, UNSET_PICKUP, pickupFromFix, shouldApplyFix, validatePickup } from '../../location/riderLocation'
@@ -356,6 +357,7 @@ export function PassengerApp({ embedded }: { embedded?: boolean }) {
       <ToastHost contained>
         <div dir={dir} className="absolute inset-0 overflow-hidden bg-white font-sans text-ink">
           {content}
+          {live && stage === 'main' && <ConnectivityBanner />}
         </div>
       </ToastHost>
     </Surface>

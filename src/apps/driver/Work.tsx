@@ -16,6 +16,18 @@ import { PAYMENT_LABEL } from '../passenger/Booking'
 import { offerAlert } from '../../captain/offerAlert'
 import { useOfferAlertStatus, useRingForOffer } from '../../captain/useOfferAlert'
 import { isIOS, navTarget, navUrl, openNav, type NavApp } from '../../captain/navLinks'
+import type { RideActionResult } from '../../captain/rideAction'
+
+/** A2.3 — what the captain is told when an operation was not confirmed by the server. */
+function useActionFeedback() {
+  const { t } = useI18n()
+  const toast = useToast()
+  return (r: RideActionResult, rejected: string) => {
+    if (r.ok || r.reason === 'busy') return
+    if (r.reason === 'offline') toast(t('لا يوجد اتصال — لم يتأكد الخادم من العملية. سنحدّث الحالة عند عودة الاتصال، ثم حاول مجدداً.', 'No connection — the server did not confirm this. The status will refresh when you are back online; then try again.'), 'error')
+    else toast(rejected, 'error')
+  }
+}
 
 /* ============================== HOME ============================== */
 
@@ -161,6 +173,8 @@ function AlertStatusRow() {
 function OfferCard({ trip, driver, pos }: { trip: Trip; driver: Driver; pos: LatLng }) {
   const { t, L } = useI18n()
   const toast = useToast()
+  const feedback = useActionFeedback()
+  const [accepting, setAccepting] = useState(false)
   const now = useNow(250)
   const total = store.state.settings.offerSeconds
   const left = Math.max(0, ((trip.offer?.expiresAt ?? now) - now) / 1000)
@@ -220,9 +234,16 @@ function OfferCard({ trip, driver, pos }: { trip: Trip; driver: Driver; pos: Lat
           </Button>
           <Button
             size="xl"
+            loading={accepting}
+            disabled={accepting}
+            data-testid="offer-accept"
             onClick={() => {
               offerAlert.resolve(trip.id)
-              void trips.acceptOffer(trip.id, driver.id).then((ok) => !ok && toast(t('انتهت صلاحية الطلب', 'Request expired'), 'error'))
+              setAccepting(true)
+              void trips.acceptOffer(trip.id, driver.id).then((r) => {
+                setAccepting(false)
+                feedback(r, t('انتهت صلاحية الطلب أو أُسند لكابتن آخر', 'The request expired or went to another captain'))
+              })
             }}
           >
             {t('قبول', 'Accept')}
@@ -259,6 +280,30 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
   const [pendingNav, setPendingNav] = useState<string | null>(null)
   const [code, setCode] = useState('')
   const [codeErr, setCodeErr] = useState(false)
+  const [busy, setBusy] = useState<null | 'arrived' | 'start' | 'complete'>(null)
+  const [startFailed, setStartFailed] = useState<null | 'offline' | 'other'>(null)
+  const feedback = useActionFeedback()
+  /** Run one operation with the button showing progress; the gateway confirms with the server. */
+  const run = (what: 'arrived' | 'complete', p: () => Promise<RideActionResult>, rejected: string) => {
+    if (busy) return
+    setBusy(what)
+    void p().then((r) => {
+      setBusy(null)
+      feedback(r, rejected)
+    })
+  }
+  const start = (c: string) => {
+    setBusy('start')
+    setStartFailed(null)
+    void trips.startTrip(trip.id, c).then((r) => {
+      setBusy(null)
+      if (r.ok) toast(t('تم التحقق. الرحلة بدأت', 'Verified. Trip started'))
+      else if (r.reason === 'busy') return
+      else if (r.reason === 'offline') setStartFailed('offline')
+      else if (r.message === 'wrong_code') setCodeErr(true)
+      else setStartFailed('other')
+    })
+  }
   const [reveal, setReveal] = useState(false)
   const rider = getCustomer(trip.passengerId)
   const pose = tripDriverPose(trip, now)
@@ -273,10 +318,7 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
 
   useEffect(() => {
     if (!arrived || code.length < 4) return
-    void trips.startTrip(trip.id, code).then((ok) => {
-      if (ok) toast(t('تم التحقق. الرحلة بدأت', 'Verified. Trip started'))
-      else setCodeErr(true)
-    })
+    start(code) // a second run for the same code (re-render, StrictMode) is refused as 'busy'
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code])
 
@@ -310,6 +352,21 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
               <OtpInput value={code} onChange={(v) => { setCode(v); setCodeErr(false) }} invalid={codeErr} />
             </div>
             {codeErr && <p className="mt-2 text-center text-sm text-danger">{t('الرمز غير مطابق. تأكد من هوية الراكب.', 'Code does not match. Confirm the rider.')}</p>}
+            {busy === 'start' && <p className="mt-2 text-center text-sm text-white/60">{t('جارٍ التحقق…', 'Checking…')}</p>}
+            {startFailed && (
+              <div className="mt-2 text-center" data-testid="start-failed">
+                <p className="text-sm text-amber-300">
+                  {startFailed === 'offline'
+                    ? t('لا يوجد اتصال — لم يتأكد بدء الرحلة.', 'No connection — the trip start was not confirmed.')
+                    : t('تعذّر بدء الرحلة. اطلب من الراكب تحديث الرمز.', 'Could not start the trip. Ask the rider to refresh the code.')}
+                </p>
+                {startFailed === 'offline' && code.length === 4 && (
+                  <button className="mt-1 text-sm font-semibold text-go underline" onClick={() => start(code)}>
+                    {t('إعادة المحاولة', 'Try again')}
+                  </button>
+                )}
+              </div>
+            )}
             <button onClick={() => setReveal(!reveal)} className="mx-auto mt-3 flex items-center gap-1.5 text-xs text-white/45">
               <Eye size={14} /> {reveal ? <span className="num tracking-widest text-white">{trip.otp}</span> : t('تجريبي: إظهار رمز الراكب', 'Demo: reveal rider code')}
             </button>
@@ -375,11 +432,11 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
               </Button>
             </div>
             {onTrip ? (
-              <Button size="xl" full className="mt-3" onClick={() => (prog >= 0.95 ? void trips.completeTrip(trip.id) : setSheet('end'))}>
+              <Button size="xl" full className="mt-3" loading={busy === 'complete'} disabled={!!busy} onClick={() => (prog >= 0.95 ? run('complete', () => trips.completeTrip(trip.id), t('تعذّر إنهاء الرحلة', 'Could not end the trip')) : setSheet('end'))}>
                 {t('إنهاء الرحلة', 'End trip')}
               </Button>
             ) : (
-              <Button size="xl" full className="mt-3" variant={prog >= 0.9 ? 'go' : 'primary'} onClick={() => void trips.markArrived(trip.id)}>
+              <Button size="xl" full className="mt-3" variant={prog >= 0.9 ? 'go' : 'primary'} loading={busy === 'arrived'} disabled={!!busy} data-testid="mark-arrived" onClick={() => run('arrived', () => trips.markArrived(trip.id), t('تعذّر تسجيل الوصول', 'Could not mark arrival'))}>
                 {t('وصلت إلى موقع الراكب', "I've arrived")}
               </Button>
             )}
@@ -432,7 +489,7 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
       </Sheet>
       <Sheet open={sheet === 'end'} onClose={() => setSheet(null)} title={t('إنهاء الرحلة قبل الوجهة؟', 'End before destination?')}>
         <p className="text-sm text-white/60">{t('لم تصل إلى الوجهة بعد. السعر المتفق عليه لن يتغير. هل أنزلت الراكب؟', "You haven't reached the destination. The agreed price stays the same. Did the rider get out?")}</p>
-        <Button full size="lg" className="mt-4" onClick={() => { void trips.completeTrip(trip.id); setSheet(null) }}>
+        <Button full size="lg" className="mt-4" disabled={!!busy} onClick={() => { run('complete', () => trips.completeTrip(trip.id), t('تعذّر إنهاء الرحلة', 'Could not end the trip')); setSheet(null) }}>
           {t('نعم، إنهاء الرحلة', 'Yes, end trip')}
         </Button>
       </Sheet>

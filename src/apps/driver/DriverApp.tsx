@@ -4,6 +4,7 @@ import { onCrossTabSignOut } from '../../auth/session'
 import { clearServerMirror, startRideSync } from '../../data/serverMirror'
 import { trips as tripGateway } from '../../data/tripGateway'
 import { useDriverGps } from '../../data/liveHooks'
+import { ConnectivityBanner } from '../shared/ConnectivityBanner'
 import { ConsentScreen, useConsentGate } from '../../privacy/ConsentScreen'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Home, History, Wallet, User } from 'lucide-react'
@@ -171,6 +172,7 @@ export function DriverApp({ embedded }: { embedded?: boolean }) {
       <ToastHost contained>
         <div dir={dir} className="absolute inset-0 overflow-hidden bg-ink font-sans text-white">
           {content}
+          {auth.mode === 'supabase' && stage === 'main' && <ConnectivityBanner />}
           {(gps === 'denied' || gps === 'unsupported') && (
             <div className="absolute inset-x-3 z-50 rounded-2xl bg-danger px-4 py-2.5 text-center text-[12.5px] font-semibold text-white" style={{ top: 'calc(var(--safe-top) + 8px)' }}>
               {t('اسمح بالوصول إلى الموقع لتستقبل الطلبات. موقعك يُرسل فقط أثناء الاتصال.', 'Allow location access to receive trips. Location is only sent while you are online.')}

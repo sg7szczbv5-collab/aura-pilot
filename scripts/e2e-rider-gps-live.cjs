@@ -184,6 +184,11 @@ async function toConfirm(p) {
     await pinHere(t.page, -40, -40)
     check(/^اختيار|اختيار Aura/.test(await body(t.page)) || (await t.page.getByRole('button', { name: /^اختيار/ }).count()) > 0, 'F4: after the pickup, the rider reaches vehicle selection')
     check(t.leaks.length === 0, `no request left the browser (${t.leaks.join(', ')})`)
+    // A2.3: the rider sees the same "no connection" banner
+    await t.ctx.setOffline(true); await t.page.waitForTimeout(600)
+    check((await t.page.locator('[data-testid=offline-banner]').count()) === 1, 'A2.3 rider: offline → "no connection" banner')
+    await t.ctx.setOffline(false); await t.page.waitForTimeout(600)
+    check((await t.page.locator('[data-testid=offline-banner]').count()) === 0, 'A2.3 rider: back online → banner gone')
     await t.ctx.close()
 
     // ── F1: a late GPS result never replaces a manual pin ────────────────────────────────────

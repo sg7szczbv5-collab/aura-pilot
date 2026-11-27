@@ -8,6 +8,7 @@
  * The captain's live position streams from driver_locations (lat/lng columns).
  */
 import type { RealtimeChannel } from '@supabase/supabase-js'
+import { connectivity } from './connectivity'
 import { getSupabase } from '../auth/supabaseClient'
 import { store } from '../core/store'
 import { isActive } from '../core/trip'
@@ -246,7 +247,30 @@ export function startRideSync(app: App, uid: string): () => void {
     if (app === 'driver') void syncDriverSelf(uid)
   }, 15_000)
 
+  // A2.3: back online, or back in front (screen unlocked, app switched back): resync NOW instead of
+  // waiting for the poll — active rides, offers, recent rides (a change may have been missed while
+  // Realtime was down) and, for the captain, the server's view of their own status.
+  const resync = () => {
+    store.state.trips.filter((t) => t.server && (isActive(t.status) || t.offer)).forEach((t) => refresh(t.id))
+    void sb
+      .from('rides')
+      .select('id')
+      .order('requested_at', { ascending: false })
+      .limit(10)
+      .then(({ data, error }) => {
+        if (error) return
+        connectivity.requestAnswered()
+        data?.forEach((r) => refresh(r.id as string))
+      })
+    if (app === 'driver') void syncDriverSelf(uid)
+  }
+  const offConn = connectivity.subscribe((online) => online && resync())
+  const onVisible = () => document.visibilityState === 'visible' && resync()
+  document.addEventListener('visibilitychange', onVisible)
+
   return () => {
+    offConn()
+    document.removeEventListener('visibilitychange', onVisible)
     window.clearInterval(poll)
     void sb.removeChannel(ch)
     if (state.locChannel) void sb.removeChannel(state.locChannel)
