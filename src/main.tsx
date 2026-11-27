@@ -15,10 +15,14 @@ import { I18nProvider } from './i18n/I18n'
 import { startDispatcher } from './core/store'
 import { PAYMENT_POLICY } from './payments/cards'
 import { installPaymentNetworkGuard } from './payments/networkGuard'
+import { installDemoNetworkGuard } from './ops/demoNetworkGuard'
 import { AUTH_MODE } from './auth/config'
 import { getSupabase } from './auth/supabaseClient'
 import { blockApp, verifyBetaBackend } from './ops/betaBackendGuard'
 
+// DEMO (no Supabase configured): no request may reach any Supabase host (C4, defence in depth —
+// the isolation itself is the build guard and the explicit env allowlist). Never active in LIVE.
+installDemoNetworkGuard(AUTH_MODE === 'mock')
 // BETA / staging / Preview: no request may reach a payment gateway, whatever the settings say.
 installPaymentNetworkGuard(PAYMENT_POLICY.mockOnly)
 // BETA builds only work against the BETA database: checked after every sign-in (migration 024).
