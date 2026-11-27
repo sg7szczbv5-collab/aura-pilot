@@ -27,6 +27,8 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Bundle environment check (no Supabase / server setting reaches the browser; Preview with server credentials refused)
+        run: npm run check:bundle-env
       - name: Preflight (development target, no secrets in bundle, headers)
         run: npm run preflight -- --json > preflight.json
       - uses: actions/upload-artifact@v4

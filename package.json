@@ -16,7 +16,9 @@
     "verify": "npm run typecheck && npm run typecheck:functions && npm test && npm run build && npm run preflight",
     "build:share": "vite build -c vite.share.config.ts",
     "e2e:ui": "node scripts/e2e-ui-trip.cjs",
-    "e2e:beta-payments": "node scripts/e2e-beta-payments.cjs"
+    "e2e:beta-payments": "node scripts/e2e-beta-payments.cjs",
+    "check:bundle-env": "node scripts/check-bundle-env.cjs",
+    "e2e:demo-isolation": "node scripts/e2e-demo-isolation.cjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans-arabic": "^5.3.0",
