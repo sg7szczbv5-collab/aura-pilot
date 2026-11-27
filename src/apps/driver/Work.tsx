@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowUp, Bell, Banknote, CornerUpLeft, CornerUpRight, CreditCard, Eye, Headphones, MessageSquare, Navigation, Phone, Power, Satellite, Star, TriangleAlert } from 'lucide-react'
+import { ArrowUp, Bell, BellOff, BellRing, Banknote, CornerUpLeft, CornerUpRight, CreditCard, Eye, Headphones, MessageSquare, Navigation, Phone, Power, Satellite, Star, TriangleAlert } from 'lucide-react'
 import { CityMap, type MapMarker } from '../../map/CityMap'
 import { Avatar, Badge, Button, CountdownRing, cx, ICON, IconButton, Money, OtpInput, Sheet, Stars, SuccessMark, Surface, useToast } from '../../ds/ui'
 import { useI18n } from '../../i18n/I18n'
@@ -13,6 +13,8 @@ import { sar, startOfDay } from '../../core/format'
 import type { Driver, LatLng, Trip } from '../../core/types'
 import { ChatSheet, CancelSheet } from '../passenger/LiveTrip'
 import { PAYMENT_LABEL } from '../passenger/Booking'
+import { offerAlert } from '../../captain/offerAlert'
+import { useOfferAlertStatus, useRingForOffer } from '../../captain/useOfferAlert'
 
 /* ============================== HOME ============================== */
 
@@ -28,6 +30,8 @@ export function DriverHome({ driver, onInbox, inboxCount, onPerformance }: { dri
   const offer = useEco((s) => s.trips.find((x) => x.status === 'searching' && x.offer?.driverId === driver.id && x.offer.expiresAt > Date.now()))
 
   const toggle = () => {
+    // A2.1: this tap is the user gesture that allows the new-trip sound (autoplay policy).
+    if (!online) void offerAlert.unlock()
     setToggling(true)
     const started = Date.now()
     void trips.setOnline(driver.id, !online).then(async (r) => {
@@ -78,6 +82,7 @@ export function DriverHome({ driver, onInbox, inboxCount, onPerformance }: { dri
           <p className="flex-1 font-display text-[17px] font-semibold">{online ? t('متصل · تستقبل الطلبات', 'Online · receiving trips') : t('غير متصل', "You're offline")}</p>
           {online && <Badge tone="live">{t('بانتظار طلب', 'Waiting for trips')}</Badge>}
         </div>
+        {online && <AlertStatusRow />}
         <div className="grid grid-cols-3 gap-2">
           <Kpi label={t('رحلات اليوم', 'Trips today')} value={String(today.count)} />
           <Kpi label={t('دخل اليوم', 'Earned today')} value={sar(today.net, 0)} unit="SAR" />
@@ -114,6 +119,42 @@ function Kpi({ label, value, unit }: { label: string; value: string; unit?: stri
   )
 }
 
+/** A2.1 — can the captain hear new requests? Locked sound needs a tap; iOS has no vibration. */
+function AlertStatusRow() {
+  const { t } = useI18n()
+  const s = useOfferAlertStatus()
+  const text = {
+    ready: t('صوت الطلبات مفعّل', 'Request sound on'),
+    locked: t('تنبيه الطلبات متوقف — اضغط هنا لتفعيل الصوت والاهتزاز', 'Request alerts are off — tap here to enable sound and vibration'),
+    muted: t('صوت الطلبات مكتوم', 'Request sound muted'),
+    unsupported: t('الصوت غير مدعوم في هذا المتصفح', 'Sound is not supported in this browser'),
+  }[s.sound]
+  return (
+    <div className="mb-3 rounded-2xl bg-ink-3 px-3 py-2.5" data-testid="alert-status">
+      <div className="flex items-center gap-2">
+        {s.sound === 'ready' ? <BellRing size={16} className="text-go" /> : <BellOff size={16} className="text-amber-300" />}
+        <button
+          className={cx('flex-1 text-start text-[12.5px] font-semibold', s.sound === 'ready' ? 'text-white' : 'text-amber-300')}
+          onClick={() => void (s.sound === 'muted' ? offerAlert.setMuted(false) : offerAlert.unlock())}
+          data-testid="alert-sound"
+          data-state={s.sound}
+        >
+          {text}
+        </button>
+        {s.sound !== 'unsupported' && (
+          <button className="text-[11.5px] text-white/55 underline" onClick={() => offerAlert.setMuted(s.sound !== 'muted')}>
+            {s.sound === 'muted' ? t('تشغيل', 'Unmute') : t('كتم', 'Mute')}
+          </button>
+        )}
+        <button className="text-[11.5px] text-white/55 underline" onClick={() => void offerAlert.test()} data-testid="alert-test">
+          {t('اختبار التنبيه', 'Test alert')}
+        </button>
+      </div>
+      {!s.vibration && <p className="mt-1 text-[11px] text-white/45" data-testid="alert-no-vibration">{t('الاهتزاز غير مدعوم في هذا الجهاز (مثل iPhone).', 'Vibration is not supported on this device (e.g. iPhone).')}</p>}
+    </div>
+  )
+}
+
 /* ============================== OFFER ============================== */
 
 function OfferCard({ trip, driver, pos }: { trip: Trip; driver: Driver; pos: LatLng }) {
@@ -125,10 +166,8 @@ function OfferCard({ trip, driver, pos }: { trip: Trip; driver: Driver; pos: Lat
   const toRiderKm = haversineKm(pos, trip.pickup.pos) * 1.2
   const toRiderMin = Math.max(2, Math.round((toRiderKm / 30) * 60))
   const rider = getCustomer(trip.passengerId)
-  useEffect(() => {
-    // gentle haptic where supported
-    ;(navigator as Navigator & { vibrate?: (p: number[]) => void }).vibrate?.([80, 60, 80])
-  }, [])
+  // A2.1: sound + vibration until accepted / declined / withdrawn / expired (stops on unmount).
+  useRingForOffer(trip.id, trip.offer?.expiresAt ?? 0)
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 z-40 flex flex-col justify-end bg-black/55">
       <motion.div initial={{ y: 60 }} animate={{ y: 0 }} exit={{ y: 60 }} transition={{ type: 'spring', damping: 26, stiffness: 300 }} className="rounded-t-[30px] bg-white px-5 pt-5 text-ink" style={{ paddingBottom: 'calc(var(--safe-bottom) + 12px)' }} role="alertdialog" aria-label={t('طلب رحلة جديد', 'New trip request')}>
@@ -171,6 +210,7 @@ function OfferCard({ trip, driver, pos }: { trip: Trip; driver: Driver; pos: Lat
             variant="secondary"
             size="xl"
             onClick={() => {
+              offerAlert.resolve(trip.id)
               void trips.declineOffer(trip.id, driver.id)
               toast(t('تم رفض الطلب', 'Request declined'), 'info')
             }}
@@ -180,6 +220,7 @@ function OfferCard({ trip, driver, pos }: { trip: Trip; driver: Driver; pos: Lat
           <Button
             size="xl"
             onClick={() => {
+              offerAlert.resolve(trip.id)
               void trips.acceptOffer(trip.id, driver.id).then((ok) => !ok && toast(t('انتهت صلاحية الطلب', 'Request expired'), 'error'))
             }}
           >
