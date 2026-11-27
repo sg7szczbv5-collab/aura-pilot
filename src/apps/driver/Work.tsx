@@ -15,6 +15,7 @@ import { ChatSheet, CancelSheet } from '../passenger/LiveTrip'
 import { PAYMENT_LABEL } from '../passenger/Booking'
 import { offerAlert } from '../../captain/offerAlert'
 import { useOfferAlertStatus, useRingForOffer } from '../../captain/useOfferAlert'
+import { isIOS, navTarget, navUrl, openNav, type NavApp } from '../../captain/navLinks'
 
 /* ============================== HOME ============================== */
 
@@ -254,7 +255,8 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
   const { t, L } = useI18n()
   const toast = useToast()
   const now = useNow(500)
-  const [sheet, setSheet] = useState<null | 'chat' | 'cancel' | 'support' | 'end'>(null)
+  const [sheet, setSheet] = useState<null | 'chat' | 'cancel' | 'support' | 'end' | 'nav-ios'>(null)
+  const [pendingNav, setPendingNav] = useState<string | null>(null)
   const [code, setCode] = useState('')
   const [codeErr, setCodeErr] = useState(false)
   const [reveal, setReveal] = useState(false)
@@ -343,6 +345,17 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
                 </p>
               </div>
             </div>
+            <NavButtons
+              trip={trip}
+              onOpen={(url) => {
+                // R1 (BETA limitation): on iPhone the browser stops sending the captain's position while
+                // another app is in front. Say so before leaving.
+                if (isIOS()) {
+                  setPendingNav(url)
+                  setSheet('nav-ios')
+                } else openNav(url)
+              }}
+            />
             <div className="mt-3 grid grid-cols-3 gap-2">
               {onTrip ? (
                 <Button variant="soft" onClick={() => setSheet('support')} icon={<Headphones size={17} />}>
@@ -397,12 +410,58 @@ export function DriverActiveTrip({ trip, driver }: { trip: Trip; driver: Driver 
           <span className="font-semibold">{t('الإبلاغ عن حادثة أو سلوك', 'Report an incident or behaviour')}</span>
         </button>
       </Sheet>
+      <Sheet open={sheet === 'nav-ios'} onClose={() => setSheet(null)} title={t('قبل فتح تطبيق الملاحة', 'Before opening navigation')}>
+        <p className="text-sm text-white/70" data-testid="nav-ios-warning">
+          {t(
+            'على iPhone يتوقف إرسال موقعك إلى الراكب ما دام تطبيق الملاحة في الواجهة، ولن تصلك طلبات جديدة. ارجع إلى AURA عند الوصول. (قيد معروف في النسخة التجريبية)',
+            'On iPhone your position stops reaching the rider while the navigation app is in front, and no new requests reach you. Come back to AURA when you arrive. (Known beta limitation)',
+          )}
+        </p>
+        <Button
+          full
+          size="lg"
+          className="mt-4"
+          onClick={() => {
+            if (pendingNav) openNav(pendingNav)
+            setPendingNav(null)
+            setSheet(null)
+          }}
+        >
+          {t('متابعة إلى الملاحة', 'Continue to navigation')}
+        </Button>
+      </Sheet>
       <Sheet open={sheet === 'end'} onClose={() => setSheet(null)} title={t('إنهاء الرحلة قبل الوجهة؟', 'End before destination?')}>
         <p className="text-sm text-white/60">{t('لم تصل إلى الوجهة بعد. السعر المتفق عليه لن يتغير. هل أنزلت الراكب؟', "You haven't reached the destination. The agreed price stays the same. Did the rider get out?")}</p>
         <Button full size="lg" className="mt-4" onClick={() => { void trips.completeTrip(trip.id); setSheet(null) }}>
           {t('نعم، إنهاء الرحلة', 'Yes, end trip')}
         </Button>
       </Sheet>
+    </div>
+  )
+}
+
+/** A2.2 — open the current target (pickup, then drop-off) in Google Maps or Waze. Coordinates only. */
+function NavButtons({ trip, onOpen }: { trip: Trip; onOpen: (url: string) => void }) {
+  const { t } = useI18n()
+  const target = navTarget(trip)
+  if (!target) return null
+  const apps: { app: NavApp; label: string }[] = [
+    { app: 'google', label: 'Google Maps' },
+    { app: 'waze', label: 'Waze' },
+  ]
+  return (
+    <div className="mt-3" data-testid="nav-buttons" data-leg={target.leg}>
+      <p className="mb-1.5 text-[11.5px] text-white/50">{target.leg === 'pickup' ? t('الملاحة إلى نقطة الالتقاء', 'Navigate to pickup') : t('الملاحة إلى الوجهة', 'Navigate to destination')}</p>
+      <div className="grid grid-cols-2 gap-2">
+        {apps.map(({ app, label }) => {
+          const url = navUrl(app, target.pos)
+          return (
+            <Button key={app} variant="soft" disabled={!url} onClick={() => url && onOpen(url)} icon={<Navigation size={16} />} data-testid={`nav-${app}`}>
+              <span dir="ltr">{label}</span>
+            </Button>
+          )
+        })}
+      </div>
     </div>
   )
 }

@@ -19,7 +19,8 @@
     "e2e:beta-payments": "node scripts/e2e-beta-payments.cjs",
     "e2e:rider-gps": "node scripts/e2e-rider-gps.cjs",
     "e2e:rider-gps-live": "node scripts/e2e-rider-gps-live.cjs",
-    "e2e:captain-alerts": "node scripts/e2e-captain-alerts.cjs"
+    "e2e:captain-alerts": "node scripts/e2e-captain-alerts.cjs",
+    "e2e:captain-nav": "node scripts/e2e-captain-nav.cjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans-arabic": "^5.3.0",
