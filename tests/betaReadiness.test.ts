@@ -90,8 +90,11 @@ describe('service_role and other secrets never reach the browser', () => {
     expect(r.status).not.toBe(0)
     expect(`${r.stdout}${r.stderr}`).toMatch(/VITE_SUPABASE_ANON_KEY holds a secret/)
   }, 60_000)
-  it('only VITE_ / NEXT_PUBLIC_ variables are bundled, and the service key is only read by server code', () => {
-    expect(readFileSync(join(ROOT, 'vite.config.ts'), 'utf8')).toMatch(/envPrefix: \['VITE_', 'NEXT_PUBLIC_'\]/)
+  it('only VITE_ variables (plus allowlisted NEXT_PUBLIC_) are bundled, and the service key is only read by server code', () => {
+    // C2 (demo isolation) tightened this: NEXT_PUBLIC_* is no longer a bundled prefix; only allowlisted names pass via define.
+    const vc = readFileSync(join(ROOT, 'vite.config.ts'), 'utf8')
+    expect(vc).toMatch(/envPrefix: \['VITE_'\]/)
+    expect(vc).toMatch(/nextPublicDefines\(env\)/)
     const deploy = readFileSync(join(ROOT, '.github/workflows/deploy.yml'), 'utf8')
     expect(deploy).toMatch(/SUPABASE_SERVICE_ROLE_KEY: \$\{\{ secrets\.SUPABASE_SERVICE_ROLE_KEY \}\}/)
     expect(deploy).not.toMatch(/VITE_[A-Z_]*: \$\{\{ secrets\./) // no secret is ever mapped to a browser variable

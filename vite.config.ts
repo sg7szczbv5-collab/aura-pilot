@@ -2,6 +2,7 @@
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { buildEnvironmentViolations } from './src/ops/buildGuards'
+import { nextPublicDefines } from './src/config/publicEnvKeys'
 
 export default defineConfig(({ mode }) => {
   // BETA / staging / Vercel Preview builds are mock-only (F3): fail the build on any payment-gateway
@@ -13,10 +14,12 @@ export default defineConfig(({ mode }) => {
   }
   return {
   plugins: [react(), tailwindcss()],
-  define: { 'import.meta.env.VITE_AURA_PAYMENTS_MOCK_ONLY': JSON.stringify(policy.mockOnly ? '1' : '') },
+  define: { 'import.meta.env.VITE_AURA_PAYMENTS_MOCK_ONLY': JSON.stringify(policy.mockOnly ? '1' : ''), ...nextPublicDefines(env) },
   base: './',
-  // NEXT_PUBLIC_* too, so a NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN set in Vercel reaches the browser.
-  envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
+  // C2: only VITE_* by prefix. NEXT_PUBLIC_* reach the browser only when allowlisted
+  // (src/config/publicEnvKeys.ts, via define above), so an integration's NEXT_PUBLIC_SUPABASE_*
+  // never does. NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN still works as before.
+  envPrefix: ['VITE_'],
   build: { chunkSizeWarningLimit: 1600 },
   server: { host: true, port: 5180 },
   preview: { host: true, port: 4180 },

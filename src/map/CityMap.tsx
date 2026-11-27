@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { PUBLIC_ENV } from '../config/publicEnv';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { MAPS_PROVIDER, pxPerKmToGoogleZoom } from '../maps/config';
@@ -129,7 +130,8 @@ function circleRing(center: LatLng, radiusKm: number): [number, number][] {
 }
 
 function getMapboxToken(): string {
-  const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  // C1: explicit, allowlisted variables only (src/config/publicEnv.ts) — never the whole import.meta.env.
+  const viteEnv: Record<string, string | undefined> = PUBLIC_ENV;
   const globalProcess = (
     globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }
   ).process;

@@ -5,7 +5,10 @@
  *   mock     : no keys → the existing demo accounts and codes, with the same
  *              lockout/session rules, so the whole flow is testable offline.
  */
-const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {}
+import { PUBLIC_ENV } from '../config/publicEnv'
+
+// C1: explicit, allowlisted variables only (src/config/publicEnv.ts) — never the whole import.meta.env.
+const env: Record<string, string | undefined> = PUBLIC_ENV
 
 export type AuthMode = 'supabase' | 'mock'
 

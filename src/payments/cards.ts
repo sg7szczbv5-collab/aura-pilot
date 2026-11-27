@@ -7,7 +7,10 @@
 import { AUTH_MODE } from '../auth/config'
 import { decidePaymentPolicy } from './paymentPolicy'
 
-const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {}
+import { PUBLIC_ENV } from '../config/publicEnv'
+
+// C1: explicit, allowlisted variables only (src/config/publicEnv.ts) — never the whole import.meta.env.
+const env: Record<string, string | undefined> = PUBLIC_ENV
 export const MOYASAR_PUBLISHABLE_KEY = env.VITE_MOYASAR_PUBLISHABLE_KEY?.trim() || undefined
 export const PAYMENT_POLICY = decidePaymentPolicy({
   appEnv: env.VITE_APP_ENV,

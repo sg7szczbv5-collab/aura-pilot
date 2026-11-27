@@ -5,7 +5,10 @@
  *   mock   : the built-in offline vector map of Riyadh (src/map/CityMap.tsx).
  * Server-side routing/pricing uses GOOGLE_MAPS_SERVER_KEY in the Edge Functions.
  */
-const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {}
+import { PUBLIC_ENV } from '../config/publicEnv'
+
+// C1: explicit, allowlisted variables only (src/config/publicEnv.ts) — never the whole import.meta.env.
+const env: Record<string, string | undefined> = PUBLIC_ENV
 
 export const GOOGLE_MAPS_KEY = env.VITE_GOOGLE_MAPS_API_KEY?.trim() || undefined
 /** Vector map id (Cloud Console → Map Management). DEMO_MAP_ID works for development. */
